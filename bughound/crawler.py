@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from urllib.parse import parse_qsl, urljoin, urlparse
 
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
@@ -19,13 +20,21 @@ def _same_origin(a: str, b: str) -> bool:
 
 
 async def crawl(
-    client: HttpClient, base_url: str, max_urls: int = 40, max_depth: int = 2
+    client: HttpClient,
+    base_url: str,
+    max_urls: int = 40,
+    max_depth: int = 2,
+    is_denied: Callable[[str], bool] | None = None,
 ) -> tuple[list[str], list[RequestTarget], str, dict[str, str]]:
     """Breadth-first same-origin crawl.
+
+    ``is_denied(url)`` marks forbidden destinations: they are never requested,
+    never enqueued, and never recorded as injectable targets.
 
     Returns (visited urls, request targets, seed_html, seed_headers).
     """
 
+    denied = is_denied or (lambda _u: False)
     seen: set[str] = set()
     visited: list[str] = []
     targets: list[RequestTarget] = []
@@ -42,7 +51,7 @@ async def crawl(
 
     while queue and len(visited) < max_urls:
         url, depth = queue.pop(0)
-        if url in seen:
+        if url in seen or denied(url):
             continue
         seen.add(url)
         resp = await client.get(url)
@@ -71,14 +80,14 @@ async def crawl(
                 name = inp.get("name")
                 if name:
                     params[name] = inp.get("value") or "test"
-            if _same_origin(action, base_url):
+            if _same_origin(action, base_url) and not denied(action):
                 add_target(RequestTarget(url=action, method=method, params=params, source="form"))
 
         if depth >= max_depth:
             continue
         for a in soup.find_all("a", href=True):
             link = urljoin(resp.url, a["href"]).split("#")[0]
-            if _same_origin(link, base_url) and link not in seen:
+            if _same_origin(link, base_url) and link not in seen and not denied(link):
                 queue.append((link, depth + 1))
                 lqs = dict(parse_qsl(urlparse(link).query))
                 if lqs:

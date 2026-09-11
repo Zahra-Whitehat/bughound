@@ -46,6 +46,8 @@ def list_modules() -> None:
 @click.argument("url")
 @click.option("--scope", "scope_file", type=click.Path(exists=True), help="YAML scope file.")
 @click.option("--authorize-host", "authorize_hosts", multiple=True, help="Host/glob you are authorized to test.")
+@click.option("--deny-host", "deny_hosts", multiple=True, help="Host/glob that is forbidden and must never be contacted (overrides scope).")
+@click.option("--deny-url", "deny_urls", multiple=True, help="URL/prefix that is forbidden and must never be contacted (overrides scope).")
 @click.option("--i-am-authorized", is_flag=True, help="Confirm you are authorized to test this target.")
 @click.option("--aggressive/--safe", default=False, help="Enable active exploitation payloads (authorized only).")
 @click.option("--max-urls", default=40, show_default=True)
@@ -55,8 +57,8 @@ def list_modules() -> None:
 @click.option("--no-external", is_flag=True, help="Do not run external tools (nuclei/nmap/sqlmap).")
 @click.option("--out", "out_dir", default="reports", show_default=True, help="Output directory.")
 @click.option("--header", "headers", multiple=True, help="Extra request header 'Name: value'.")
-def scan(url, scope_file, authorize_hosts, i_am_authorized, aggressive, max_urls, max_depth,
-         timeout, modules, no_external, out_dir, headers) -> None:
+def scan(url, scope_file, authorize_hosts, deny_hosts, deny_urls, i_am_authorized, aggressive,
+         max_urls, max_depth, timeout, modules, no_external, out_dir, headers) -> None:
     """Scan a URL for vulnerabilities and write reports."""
 
     extra_headers = {}
@@ -65,7 +67,12 @@ def scan(url, scope_file, authorize_hosts, i_am_authorized, aggressive, max_urls
             k, v = h.split(":", 1)
             extra_headers[k.strip()] = v.strip()
 
-    scope = load_scope(scope_file=scope_file, explicit_hosts=list(authorize_hosts))
+    scope = load_scope(
+        scope_file=scope_file,
+        explicit_hosts=list(authorize_hosts),
+        denied_hosts=list(deny_hosts),
+        denied_urls=list(deny_urls),
+    )
     config = ScanConfig(
         target_url=url,
         max_urls=max_urls,

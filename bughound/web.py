@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .authorization import AuthorizationError, load_scope
 from .engine import run_scan
@@ -24,7 +24,9 @@ SCANS: dict[str, dict[str, Any]] = {}
 class ScanRequest(BaseModel):
     url: str
     authorized: bool = False
-    authorize_hosts: list[str] = []
+    authorize_hosts: list[str] = Field(default_factory=list)
+    deny_hosts: list[str] = Field(default_factory=list)
+    deny_urls: list[str] = Field(default_factory=list)
     aggressive: bool = False
     max_urls: int = 40
     max_depth: int = 2
@@ -33,7 +35,11 @@ class ScanRequest(BaseModel):
 
 async def _run(scan_id: str, req: ScanRequest) -> None:
     entry = SCANS[scan_id]
-    scope = load_scope(explicit_hosts=req.authorize_hosts)
+    scope = load_scope(
+        explicit_hosts=req.authorize_hosts,
+        denied_hosts=req.deny_hosts,
+        denied_urls=req.deny_urls,
+    )
     config = ScanConfig(
         target_url=req.url,
         aggressive=req.aggressive,
@@ -110,6 +116,10 @@ INDEX_HTML = """<!doctype html>
 <input id="url" type="text" placeholder="https://example.com" />
 <label>Authorized host(s) (comma-separated glob, e.g. *.example.com)</label>
 <input id="hosts" type="text" placeholder="example.com" />
+<label>Forbidden host(s) (comma-separated glob &mdash; never contacted)</label>
+<input id="denyhosts" type="text" placeholder="admin.example.com, *.internal.example.com" />
+<label>Forbidden URL(s) (comma-separated prefix &mdash; never contacted)</label>
+<input id="denyurls" type="text" placeholder="https://example.com/logout" />
 <div class="row"><label><input id="authorized" type="checkbox"/> I am authorized to test this target</label></div>
 <div class="row"><label><input id="aggressive" type="checkbox"/> Aggressive (active exploitation)</label></div>
 <button onclick="startScan()">Start scan</button>
@@ -119,8 +129,11 @@ INDEX_HTML = """<!doctype html>
 <script>
 let timer=null;
 async function startScan(){
+  const csv=id=>document.getElementById(id).value.split(',').map(s=>s.trim()).filter(Boolean);
   const body={url:document.getElementById('url').value,
-    authorize_hosts:document.getElementById('hosts').value.split(',').map(s=>s.trim()).filter(Boolean),
+    authorize_hosts:csv('hosts'),
+    deny_hosts:csv('denyhosts'),
+    deny_urls:csv('denyurls'),
     authorized:document.getElementById('authorized').checked,
     aggressive:document.getElementById('aggressive').checked};
   const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});

@@ -5,4 +5,14 @@ allowed_hosts:
   - "*.example.com"
   - 127.0.0.1
   - localhost
+
+# Denylist: hosts (glob) and URL prefixes that are forbidden / out of scope.
+# These are ALWAYS blocked and override allowed_hosts -- bughound never crawls
+# or sends a single request to them, even via redirects or external tools.
+denied_hosts:
+  - admin.example.com
+  - "*.internal.example.com"
+denied_urls:
+  - https://example.com/logout
+  - https://example.com/billing
 note: "Authorized pentest scope for the ACME engagement (ticket ACME-123)."
