@@ -1,0 +1,8 @@
+# Declare the hosts you are authorized to test. bughound refuses to scan any
+# host not matched here. Glob patterns are supported (e.g. *.example.com).
+allowed_hosts:
+  - example.com
+  - "*.example.com"
+  - 127.0.0.1
+  - localhost
+note: "Authorized pentest scope for the ACME engagement (ticket ACME-123)."
