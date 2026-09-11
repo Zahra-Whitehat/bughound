@@ -58,6 +58,30 @@ Authorization can be provided by any of: `--scope <file>`, one or more
 `--authorize-host <glob>`, or the `BUGHOUND_AUTHORIZED_HOSTS` env var. You must
 also pass `--i-am-authorized`.
 
+### Denylist (forbidden / out-of-scope targets)
+
+Mark hosts or URLs as forbidden and bughound will **never** crawl them or send a
+single request to them — not during crawling, not from any scanner module, not
+via redirects, and not through external tools. Deny rules are enforced at the
+HTTP layer before any connection is opened and **override the allowlist**: a
+denied target is refused even if it is otherwise in authorized scope.
+
+```bash
+bughound scan https://example.com \
+  --authorize-host example.com \
+  --deny-host admin.example.com \
+  --deny-host '*.internal.example.com' \
+  --deny-url https://example.com/logout \
+  --deny-url https://example.com/billing \
+  --i-am-authorized
+```
+
+Deny rules can also be supplied via the scope YAML (`denied_hosts`,
+`denied_urls`), the `BUGHOUND_DENIED_HOSTS` env var (comma-separated), or the
+web API (`deny_hosts`, `deny_urls`). Matching is case-insensitive; `denied_hosts`
+uses glob patterns (use `*.example.com` to cover subdomains) and `denied_urls`
+matches by URL prefix (trailing slashes and fragments are ignored).
+
 ## Web service
 
 ```bash
@@ -66,7 +90,7 @@ bughound serve --host 127.0.0.1 --port 8000
 ```
 
 API:
-- `POST /api/scan` `{ "url", "authorized": true, "authorize_hosts": [...], "aggressive": false }`
+- `POST /api/scan` `{ "url", "authorized": true, "authorize_hosts": [...], "deny_hosts": [...], "deny_urls": [...], "aggressive": false }`
 - `GET /api/scan/{id}` → status, log, result
 - `GET /api/scan/{id}/report.md` → Markdown report
 

@@ -48,11 +48,21 @@ async def run_scan(
         timeout=config.timeout,
         user_agent=config.user_agent,
         extra_headers=config.extra_headers,
+        blocked=scope.url_denied,
     )
     try:
+        if scope.denied_hosts or scope.denied_urls:
+            emit(
+                f"Denylist active: {len(scope.denied_hosts)} host pattern(s), "
+                f"{len(scope.denied_urls)} URL prefix(es) will never be contacted."
+            )
         emit("Crawling target...")
         urls, request_targets, seed_html, seed_headers = await crawl(
-            client, config.target_url, config.max_urls, config.max_depth
+            client,
+            config.target_url,
+            config.max_urls,
+            config.max_depth,
+            is_denied=scope.url_denied,
         )
         ctx = ScanContext(
             client=client,
@@ -86,7 +96,7 @@ async def run_scan(
                 result.add(f)
 
         if config.use_external_tools:
-            await _run_external(config, ctx, result, emit)
+            await _run_external(config, ctx, result, emit, scope)
     finally:
         await client.aclose()
 
@@ -95,7 +105,10 @@ async def run_scan(
     return result
 
 
-async def _run_external(config, ctx, result, emit) -> None:
+async def _run_external(config, ctx, result, emit, scope) -> None:
+    if scope.url_denied(config.target_url):
+        result.errors.append("External tools skipped: target is on the denylist.")
+        return
     host = integrations.host_from_url(config.target_url)
     missing = integrations.missing_tools_note()
     if missing:
@@ -103,9 +116,11 @@ async def _run_external(config, ctx, result, emit) -> None:
 
     tasks = [integrations.run_nuclei(config.target_url)]
     if config.aggressive:
-        tasks.append(integrations.run_nmap(host))
+        if not scope.host_denied(host):
+            tasks.append(integrations.run_nmap(host))
         for rt in ctx.request_targets[:3]:
-            tasks.append(integrations.run_sqlmap(rt.url, rt.method, rt.params))
+            if not scope.url_denied(rt.url):
+                tasks.append(integrations.run_sqlmap(rt.url, rt.method, rt.params))
     emit("Running external tools (nuclei/nmap/sqlmap where available)...")
     for group in await asyncio.gather(*tasks, return_exceptions=True):
         if isinstance(group, Exception):
