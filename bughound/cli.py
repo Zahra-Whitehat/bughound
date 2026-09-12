@@ -119,17 +119,45 @@ def serve(host, port) -> None:
     uvicorn.run("bughound.web:app", host=host, port=port, reload=False)
 
 
+# Row color by severity -- brightest/boldest for what needs attention first.
+SEVERITY_STYLES = {
+    "critical": "bold red",
+    "high": "red",
+    "medium": "yellow",
+    "low": "cyan",
+    "info": "dim",
+}
+
+
 def _print_summary(result) -> None:
     table = Table(title="Findings")
+    table.add_column("Module")
     table.add_column("Sev")
     table.add_column("Class")
     table.add_column("Title")
     table.add_column("URL", overflow="fold")
     table.add_column("Verified")
-    for f in result.sorted_findings:
+
+    # Group rows by the module that produced them, most-severe first within
+    # each group. A visible section divider separates one module's block of
+    # findings from the next.
+    findings = sorted(result.sorted_findings, key=lambda f: (f.module, -f.severity.rank))
+
+    current_module = None
+    for f in findings:
+        if current_module is not None and f.module != current_module:
+            table.add_section()
+        current_module = f.module
+
+        style = SEVERITY_STYLES.get(f.severity.value.lower(), "")
         table.add_row(
-            f.severity.value.upper(), f.category.value, f.title, f.url,
+            f.module,
+            f.severity.value.upper(),
+            f.category.value,
+            f.title,
+            f.url,
             "yes" if f.verified else f.confidence,
+            style=style,
         )
     console.print(table)
     if result.errors:
