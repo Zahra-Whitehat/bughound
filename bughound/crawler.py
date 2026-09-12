@@ -16,7 +16,10 @@ warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 def _same_origin(a: str, b: str) -> bool:
     pa, pb = urlparse(a), urlparse(b)
-    return (pa.scheme, pa.hostname, pa.port) == (pb.scheme, pb.hostname, pb.port)
+    # Normalize ports: treat None as default (80 for http, 443 for https)
+    port_a = pa.port or (443 if pa.scheme == "https" else 80)
+    port_b = pb.port or (443 if pb.scheme == "https" else 80)
+    return (pa.scheme, pa.hostname, port_a) == (pb.scheme, pb.hostname, port_b)
 
 
 async def crawl(
@@ -55,6 +58,7 @@ async def crawl(
             continue
         seen.add(url)
         resp = await client.get(url)
+        print(f"DEBUG: Checked {url} -> Status: {getattr(resp, 'status', 'N/A')}, OK: {resp.ok}")
         if not resp.ok:
             continue
         visited.append(resp.url)
