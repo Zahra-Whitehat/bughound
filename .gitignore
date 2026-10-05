@@ -8,3 +8,11 @@ reports/
 .mypy_cache/
 build/
 dist/
+reports/
+__pycache__/
+*.pyc
+.pytest_cache/
+reports/
+__pycache__/
+*.pyc
+.pytest_cache/
