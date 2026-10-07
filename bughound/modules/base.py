@@ -17,6 +17,13 @@ class RequestTarget:
     method: str = "GET"
     params: dict[str, str] = field(default_factory=dict)
     source: str = ""  # e.g. "query", "form"
+    # Raw-body targets (XML/JSON endpoints): the body template carries an
+    # ``{INJ}`` marker where payloads are substituted; ``encoding`` names a
+    # WAF-bypass payload encoding applied at the marker (e.g.
+    # "xml-entities" -> numeric character references).
+    body_template: str = ""
+    content_type: str = ""
+    encoding: str = ""
 
 
 @dataclass
@@ -32,6 +39,41 @@ class ScanContext:
     seed_html: str = ""
     seed_headers: dict[str, str] = field(default_factory=dict)
     log: Callable[[str], None] = lambda msg: None
+    # Shared, mutable recon dictionary. Passive recon modules write structured
+    # attack-surface data here (subdomains, DNS records, tech stack, WAF,
+    # discovered endpoints, emails, etc.); the engine merges it into
+    # ``ScanResult.recon`` after every module finishes. Modules SHOULD guard
+    # against clobbering keys written by earlier modules (use ``setdefault``
+    # for lists/dicts).
+    recon: dict[str, object] = field(default_factory=dict)
+
+
+# Stable keys used in ``ScanContext.recon`` / ``ScanResult.recon``. The
+# reporting layer uses this list to render the Reconnaissance section in a
+# predictable order regardless of which modules ran.
+RECON_KEYS: list[str] = [
+    "subdomains",
+    "subdomain_takeover_candidates",
+    "dns_records",
+    "whois",
+    "favicon_hash",
+    "wayback_urls",
+    "wayback_interesting_urls",
+    "email_security",      # SPF / DMARC / DKIM posture
+    "tech_stack",          # {category: [products]}
+    "waf",                 # str | None
+    "http_methods",        # list[str]
+    "js_endpoints",        # list[str]
+    "emails",              # list[str]
+    "admin_paths",         # list[str]
+    "api_docs",            # list[str]
+    "backup_files",        # list[str]
+    "sourcemaps",          # list[str]
+    "robots_txt",          # str
+    "sitemap_urls",        # list[str]
+    "security_txt",        # str
+    "well_known_paths",    # list[str]
+]
 
 
 class Module:

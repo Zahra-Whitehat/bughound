@@ -1,0 +1,1231 @@
+[1mdiff --git a/README.md b/README.md[m
+[1mindex a5bd12e..321df82 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -2,8 +2,11 @@[m
+ [m
+ An **authorized** web-vulnerability hunting agent. Given a URL/domain, bughound[m
+ crawls the target, runs a set of scanner modules (plus external tools when[m
+[31m-installed), attempts to **verify/prove** findings, and writes **Markdown + JSON[m
+[31m-reports**. It ships as both a **CLI** and a **web service**.[m
+[32m+[m[32minstalled), **exploits what it finds to prove real impact**, **verifies every[m
+[32m+[m[32mfinding against false positives with control experiments**, **pinpoints where[m
+[32m+[m[32min the code each vulnerability lives**, and writes **Markdown + JSON reports**[m
+[32m+[m[32mwhere every claim is backed by a copy-pasteable proof. It ships as both a[m
+[32m+[m[32m**CLI** and a **web service**.[m
+ [m
+ > ⚠️ **Legal / authorization.** Scanning or exploiting systems you do not own or[m
+ > lack written permission to test is illegal in most jurisdictions. bughound[m
+[36m@@ -12,6 +15,180 @@[m [mreports**. It ships as both a **CLI** and a **web service**.[m
+ > it against assets you own or are contractually authorized to test (e.g. a[m
+ > bug-bounty program whose scope permits automated testing).[m
+ [m
+[32m+[m[32m## What's new in 0.6.2 (recon hardening)[m
+[32m+[m
+[32m+[m[32mRecon breadth brought up toward Sn1per-parity, while keeping the authorization[m
+[32m+[m[32minvariant that out-of-scope hosts are reported but never contacted:[m
+[32m+[m
+[32m+[m[32m- **Active subdomain brute force** joins the existing crt.sh (Certificate[m
+[32m+[m[32m  Transparency) lookup in `subdomain-enum` -- a ~90-entry wordlist resolved[m
+[32m+[m[32m  via DNS-over-HTTPS catches hosts that never had a logged TLS certificate.[m
+[32m+[m[32m- **Subdomain-takeover detection**: every resolved subdomain's CNAME is[m
+[32m+[m[32m  checked against 27 third-party-platform fingerprints (GitHub Pages,[m
+[32m+[m[32m  Heroku, S3, Azure, Netlify, Vercel, ...). Flagged from DNS evidence only --[m
+[32m+[m[32m  bughound never sends an HTTP request to a subdomain outside confirmed[m
+[32m+[m[32m  scope, so takeover candidates are reported as unconfirmed pending manual[m
+[32m+[m[32m  verification or a scope expansion + re-scan.[m
+[32m+[m[32m- **Favicon hash fingerprinting** (`tech-fingerprint`): a pure-Python[m
+[32m+[m[32m  MurmurHash3 implementation reproduces Shodan/Censys's `http.favicon.hash`,[m
+[32m+[m[32m  giving a single high-confidence value to pivot on across the internet for[m
+[32m+[m[32m  the exact product/version in use.[m
+[32m+[m[32m- **New `whois-recon` module**: registrar, creation/expiry dates,[m
+[32m+[m[32m  nameservers and registrant org via RDAP (`rdap.org`), the modern[m
+[32m+[m[32m  HTTPS-based successor to the WHOIS protocol -- no legacy WHOIS client[m
+[32m+[m[32m  needed.[m
+[32m+[m[32m- **New `wayback-urls` module**: harvests every URL archive.org's Wayback[m
+[32m+[m[32m  Machine has ever crawled for the target domain, and separately flags[m
+[32m+[m[32m  archived paths that look like backups/config/credential files[m
+[32m+[m[32m  (`.sql`, `.bak`, `.env`, `.pem`, ...) -- often the highest-yield recon[m
+[32m+[m[32m  source for endpoints the live site no longer links to.[m
+[32m+[m
+[32m+[m[32m## What's new in 0.6.1[m
+[32m+[m
+[32m+[m[32m- **Fixed: bare-path `--exploit-endpoint` silently failed.** Passing `--exploit-endpoint /product/stock` (path instead of full URL) produced the hostless URL `http:///product/stock`; every exploit request then failed with a synthetic status-0 response and the direct-exploit chain quietly did nothing (no error shown). Bare paths are now resolved against the scan target (`https://<target>/product/stock`), and the console prints the resolved URL. Regression-tested (5 new tests; suite at 107).[m
+[32m+[m
+[32m+[m[32m## What's new in 0.6[m
+[32m+[m
+[32m+[m[32m- **Raw-body direct exploitation (XML/JSON endpoints).** `--exploit-body '<stockCheck><productId>1</productId><storeId>{INJ}</storeId></stockCheck>'` turns any raw-body endpoint into a full injection target: every exploit strategy (UNION shape discovery, dialect probing, table/column enumeration, credential extraction, credential login) substitutes payloads at the `{INJ}` marker.[m
+[32m+[m[32m- **WAF-bypass payload encodings.** `--exploit-encode xml-entities` numeric-character-reference-encodes every payload at the injection point, so filters that scan the raw body for SQL keywords see nothing while the XML parser hands the original payload to the SQL engine.[m
+[32m+[m[32m- **Authorization UX fix.** `--i-am-authorized` alone now auto-scopes the scan to the exact target host (denylist still overrides; explicit `--authorize-host`/`--scope` still win). `--authorize-host` also accepts URLs and `host:port` and normalizes them to the hostname.[m
+[32m+[m[32m- **Dialect-detection fixes.** Version-banner matching no longer truncates real PostgreSQL banners (~126 chars); dialect probes are ordered most-specific-first (PostgreSQL's `||` probe cannot fire on MySQL, MySQL's `CONCAT` cannot be trusted alone on PostgreSQL); the Oracle static fallback now verifies the dialect via `FROM dual` instead of matching any database.[m
+[32m+[m[32m- **Raw-body evidence.** curl PoCs and raw HTTP exchanges for body-template targets render the actual (encoded) body with the correct Content-Type.[m
+[32m+[m
+[32m+[m[32m## What's new in 0.5[m
+[32m+[m
+[32m+[m[32m### 1. Exploits that complete the lab objective[m
+[32m+[m
+[32m+[m[32m- **Direct-exploit mode** — you already know the lab's vulnerable endpoint?[m
+[32m+[m[32m  Point the exploit engine straight at it and it runs the full chain[m
+[32m+[m[32m  (UNION extraction → credential dump → automatic login → account takeover),[m
+[32m+[m[32m  regardless of what the crawler/detector found:[m
+[32m+[m
+[32m+[m[32m  ```bash[m
+[32m+[m[32m  bughound scan https://lab.web-security-academy.net/ \[m
+[32m+[m[32m      --authorize-host lab.web-security-academy.net --i-am-authorized \[m
+[32m+[m[32m      --aggressive \[m
+[32m+[m[32m      --exploit-endpoint 'https://lab.web-security-academy.net/filter?category=Pets' \[m
+[32m+[m[32m      --exploit-param category[m
+[32m+[m[32m  ```[m
+[32m+[m
+[32m+[m[32m- **Broader lab dialect support**: Oracle (`FROM dual`, `v$version`,[m
+[32m+[m[32m  `all_tables`/`all_tab_columns`, `LISTAGG`) and MSSQL (`@@version`,[m
+[32m+[m[32m  `FOR XML PATH` enumeration) joined SQLite / MySQL / PostgreSQL for UNION and[m
+[32m+[m[32m  blind extraction.[m
+[32m+[m[32m- **More reliable UNION shape discovery**: candidate column counts are now[m
+[32m+[m[32m  validated by reflecting a unique marker through a string column, so[m
+[32m+[m[32m  suppressed-error endpoints can no longer lock the search onto a wrong count.[m
+[32m+[m[32m- Findings the detector missed as re-targetable are no longer dropped: the[m
+[32m+[m[32m  exploit engine reconstructs a request target from the finding and still[m
+[32m+[m[32m  attempts the chain.[m
+[32m+[m[32m- The console prints a dedicated **Exploit results** block at the end of the[m
+[32m+[m[32m  scan (one ✓ line per successful exploit), so exploitation status is[m
+[32m+[m[32m  impossible to miss.[m
+[32m+[m
+[32m+[m[32m### 2. False-positive verification (control experiments)[m
+[32m+[m
+[32m+[m[32mEvery finding that the exploit phase could **not** prove is re-tested by[m
+[32m+[m[32m`bughound/verification.py` with a battery of control experiments, and the[m
+[32m+[m[32mreport answers "how do we know this is not a false positive?" with the actual[m
+[32m+[m[32mresults:[m
+[32m+[m
+[32m+[m[32m| Check | What it proves |[m
+[32m+[m[32m|---|---|[m
+[32m+[m[32m| `negative-control` | a payload with the active ingredient removed (no quote, no operator, no traversal...) does **not** trigger the signature — so the signature is input-specific, not page noise |[m
+[32m+[m[32m| `repeat-consistency` | the signature reproduces on every repeat request — real injection is deterministic; rotating banners and A/B content are not |[m
+[32m+[m[32m| `baseline-clean` | the unmodified request shows no signature |[m
+[32m+[m[32m| `fresh-canary-*` | reflection findings are re-tested with a unique random canary per check — stale markers can never fake a reflection |[m
+[32m+[m[32m| `directionality` | for boolean SQLi, TRUE must resemble baseline and FALSE must differ — in that direction only |[m
+[32m+[m[32m| `timing-jitter` | for time-based SQLi, baseline network jitter is small enough to trust the delay signal |[m
+[32m+[m
+[32m+[m[32mFindings that pass everything get a **LOW false-positive risk** verdict; any[m
+[32m+[m[32mfailed check **downgrades** the finding (`verified=False`, `confidence=[m
+[32m+[m[32mtentative`) and prints a FAIL row in the report's *False-positive analysis*[m
+[32m+[m[32mtable. A succeeded exploit is its own FP disproof and bypasses the battery.[m
+[32m+[m
+[32m+[m[32m### 3. Reports that show WHERE the vulnerability lives[m
+[32m+[m
+[32m+[m[32m- **`--source-dir <path>`**: give it the application's source code and every[m
+[32m+[m[32m  finding is mapped to the exact **file + line range + enclosing function +[m
+[32m+[m[32m  sink line** (marked with `->`) — e.g. `os.popen(f"ping -c 1 {host}")` at[m
+[32m+[m[32m  `examples/vulnerable_app.py:280`, inside `ping()`.[m
+[32m+[m[32m  Supports FastAPI/Flask-style decorators, Express/Node routes, Spring[m
+[32m+[m[32m  mappings, and PHP `$_GET` usage; sinks detected include SQL execute,[m
+[32m+[m[32m  shell exec, file read, server-side fetch, redirect and raw echo.[m
+[32m+[m[32m- **No source available?** (black-box lab) Each finding instead carries a[m
+[32m+[m[32m  clearly-labelled **reconstructed sink pattern** — the shape of code the[m
+[32m+[m[32m  input provably reaches, derived from the captured behavioural evidence[m
+[32m+[m[32m  (quote breaks query, tautology changes result set, command output echoes...).[m
+[32m+[m[32m- Every finding also shows its **injection point**[m
+[32m+[m[32m  (e.g. `GET /filter?category=... -> query-string parameter 'category'`).[m
+[32m+[m[32m- Methodology appendix documents the verification and code-attribution steps.[m
+[32m+[m
+[32m+[m[32m## Exploitation & proof (0.4 features, extended in 0.5)[m
+[32m+[m
+[32m+[m[32mDetection alone tells you "something looks wrong". bughound's **exploit phase**[m
+[32m+[m[32m(runs automatically in aggressive mode) goes further: every detected finding is[m
+[32m+[m[32mre-targeted with a **safe, non-destructive exploit** that demonstrates the[m
+[32m+[m[32mactual impact — and for SQLi that means **completing the attack objective**,[m
+[32m+[m[32mnot just proving an error:[m
+[32m+[m
+[32m+[m[32m| Finding class | Exploit proof attempted |[m
+[32m+[m[32m|---|---|[m
+[32m+[m[32m| Error-based SQLi | Adaptive UNION extraction (column count + quote-context + string-column discovery): DB version banner, table list, **then real credential rows from any users/credential table** |[m
+[32m+[m[32m| UNION with credentials | **Automatic login** through the application's own login form with the extracted credentials → **ACCOUNT TAKEOVER** proof (failed-login baseline comparison, session markers) |[m
+[32m+[m[32m| Hidden data | Tautology injection (`' OR 1=1--`) that makes filtered-out records reappear — proven by measuring content growth beyond payload reflection |[m
+[32m+[m[32m| Boolean-blind SQLi | Character-by-character binary-search extraction of **a privileged user's password** (length + chars, hash auto-cracking), falling back to the DB version banner |[m
+[32m+[m[32m| Blind + extracted password | **Automatic login** → **ACCOUNT TAKEOVER** proof |[m
+[32m+[m[32m| Cookie SQLi (TrackingId-style) | Cookies are treated as injectable parameters end-to-end: detected, UNION-probed, blind-extracted — with the cookie override isolated to single requests |[m
+[32m+[m[32m| Time-based SQLi | Boolean-oracle upgrade probe, then extraction when possible |[m
+[32m+[m[32m| OS command injection | Runs `id` / `uname -sr` / `hostname` and captures the output — proves RCE **and which user** |[m
+[32m+[m[32m| Path traversal / LFI | Reads `/etc/passwd` (accounts listed) plus a second distinct file to prove the read is arbitrary |[m
+[32m+[m[32m| Reflected XSS | Verifies `<script>`, `onerror=`, `svg onload=` payloads survive unfiltered in an HTML context (content-type aware) |[m
+[32m+[m[32m| SSRF | Makes the target fetch **its own loopback address** and return its content — proves server-side fetching with data exfiltration |[m
+[32m+[m[32m| Open redirect | Walks and documents the full redirect chain (hop-by-hop) |[m
+[32m+[m[32m| NoSQL operator injection | Attempts a real authentication bypass via `[$ne]` and detects authenticated-page markers |[m
+[32m+[m[32m| Everything else | Gets a curl repro + raw HTTP exchange + impact statement + manual steps |[m
+[32m+[m
+[32m+[m[32m**Every exploited finding lands in the report with:**[m
+[32m+[m
+[32m+[m[32m- ✅ **EXPLOITED** badge and an executive-summary count,[m
+[32m+[m[32m- the **data extracted from the target** (DB banner, table names, **credential[m
+[32m+[m[32m  rows**, `/etc/passwd` lines, `uid=...` output, loopback fingerprints...),[m
+[32m+[m[32m- the **account-takeover proof** when extracted credentials successfully[m
+[32m+[m[32m  logged into the application (objective completion, not just a read),[m
+[32m+[m[32m- a **ready-to-run `curl` reproduction** (copy-paste, works as-is),[m
+[32m+[m[32m- the **verbatim raw HTTP request/response exchange** (Burp-style),[m
+[32m+[m[32m- numbered **manual reproduction steps** for triagers,[m
+[32m+[m[32m- a written **impact statement** per vulnerability class,[m
+[32m+[m[32m- the **Vulnerable code location** section (source-mapped sink or[m
+[32m+[m[32m  behaviour-derived reconstruction),[m
+[32m+[m[32m- the **False-positive analysis** section (control-experiment table + verdict).[m
+[32m+[m
+[32m+[m[32mWhen an exploit *cannot* be completed, the report says so honestly[m
+[32m+[m[32m(`Exploit phase result: ...`) and the finding keeps its detection-stage[m
+[32m+[m[32mevidence and confidence label — bughound never upgrades a finding it could[m
+[32m+[m[32mnot prove.[m
+[32m+[m
+[32m+[m[32m**Safety rules of the exploit phase** (all enforced in code):[m
+[32m+[m
+[32m+[m[32m- Requires `--aggressive` **and** the normal authorization gate; disable[m
+[32m+[m[32m  independently with `--no-exploit` (CLI) or `"exploit": false` (web API).[m
+[32m+[m[32m- Strictly read-only / informational payloads: SQL extraction of metadata and[m
+[32m+[m[32m  credential rows, `id`/`uname`, system-file reads, marker reflections, and[m
+[32m+[m[32m  logins **using credentials the target itself leaked** (at most 2 attempts —[m
+[32m+[m[32m  a failed-login baseline plus the extracted credential — never brute-force).[m
+[32m+[m[32m  No data is modified, no destructive or denial-of-service payloads exist in[m
+[32m+[m[32m  the codebase.[m
+[32m+[m[32m- SSRF proofs target **loopback / the target itself only** — cloud metadata[m
+[32m+[m[32m  endpoints (169.254.169.254 etc.) are hard-blocked.[m
+[32m+[m[32m- Every exploit request flows through the same denylist-guarded HTTP client[m
+[32m+[m[32m  as the rest of the scan; cookie-override probes are restored immediately[m
+[32m+[m[32m  so the scanner's own session is never polluted.[m
+[32m+[m[32m- Per-finding request budgets keep the phase fast and gentle.[m
+[32m+[m
+[32m+[m[32mA full example report produced against the bundled vulnerable demo app is in[m
+[32m+[m[32m[`examples/sample-report.md`](examples/sample-report.md).[m
+[32m+[m
+ ## Vulnerability classes covered[m
+ [m
+ | Group | Classes | How |[m
+[36m@@ -23,12 +200,41 @@[m [mreports**. It ships as both a **CLI** and a **web service**.[m
+ | Client-side | XSS (reflected), CSRF, CORS, clickjacking | XSS/CORS/clickjacking verified; CSRF form heuristic |[m
+ | Logic & config | business logic*, information disclosure, security misconfig, TLS | exposed files/headers/dir-listing/TLS verified |[m
+ | Crypto | hardcoded secrets, JWT flaws (alg=none), weak hashing indicators | client-content scanning |[m
+[32m+[m[32m| **Reconnaissance** | subdomains, DNS records, tech stack, WAF, HTTP methods, JS endpoints, admin panels, API docs, backup files, source maps, emails, robots/sitemap | passive discovery (no payloads) |[m
+ [m
+ `*` = surfaced as an honestly-labeled **candidate/advisory** finding for manual[m
+ verification (these classes generally need authenticated context or human[m
+ judgement). Findings are marked `verified` (proven) vs `confidence:[m
+ tentative/firm` so reports never overclaim.[m
+ [m
+[32m+[m[32m## Reconnaissance (passive attack-surface mapping)[m
+[32m+[m
+[32m+[m[32mThe recon layer is what makes bughound useful as a *recon* tool, not just a[m
+[32m+[m[32mvuln scanner. It runs **always-on in safe (passive) mode** and produces both[m
+[32m+[m[32mINFO-severity findings and a structured `recon` block in the JSON / Markdown[m
+[32m+[m[32mreport. The 12 dedicated recon modules are:[m
+[32m+[m
+[32m+[m[32m| Module | What it discovers |[m
+[32m+[m[32m|---|---|[m
+[32m+[m[32m| `robots-sitemap` | `robots.txt`, `sitemap.xml`, `humans.txt`, `security.txt`, well-known endpoints — surfaces hidden paths |[m
+[32m+[m[32m| `dns-recon` | A / AAAA / MX / TXT / NS / CAA / SOA records via DNS-over-HTTPS (no `dnspython` needed) + SPF / DMARC posture |[m
+[32m+[m[32m| `subdomain-enum` | Subdomains from the Certificate Transparency log (crt.sh) |[m
+[32m+[m[32m| `tech-fingerprint` | Wappalyzer-style detection of web server, language, framework, CMS, CDN, analytics, JS libs |[m
+[32m+[m[32m| `waf-detection` | Cloudflare / AWS WAF / Akamai / Sucuri / Imperva / F5 / Fortinet / etc. |[m
+[32m+[m[32m| `http-methods` | OPTIONS-based method enumeration + risky-method flagging + TRACE-based XST check |[m
+[32m+[m[32m| `js-endpoints` | API endpoints / paths extracted from same-origin JS files (REST, GraphQL, internal) |[m
+[32m+[m[32m| `admin-panels` | 60+ common management paths (/admin, /wp-admin, /phpmyadmin, /actuator, /jenkins, /solr, /kibana, /grafana, ...) |[m
+[32m+[m[32m| `api-discovery` | Swagger / OpenAPI / GraphQL introspection / ReDoc / Spring HAL / RAML / api-docs |[m
+[32m+[m[32m| `backup-files` | `.bak` / `.old` / `.orig` / `~` / `.swp` / `.zip` / `.tar.gz` / `.sql` / `.save` / etc. variants of crawled paths |[m
+[32m+[m[32m| `sourcemap-exposure` | `.js.map` files that ship with minified bundles (leaks un-minified source) |[m
+[32m+[m[32m| `email-harvest` | Email addresses from HTML `mailto:` and free-text + same-origin JS |[m
+[32m+[m
+[32m+[m[32mExisting passive modules — `cookies`, `cors`, `info-disclosure` (now 80+ paths),[m
+[32m+[m[32m`secrets` (now 60+ patterns), `security-headers` (now 12 checks incl.[m
+[32m+[m[32mPermissions-Policy / COEP / COOP / CORP), `tls` — are also part of the recon[m
+[32m+[m[32mlayer. The denylist always applies, so recon requests never touch forbidden[m
+[32m+[m[32mhosts / URLs.[m
+[32m+[m
+ ## Install[m
+ [m
+ ```bash[m
+[36m@@ -48,9 +254,24 @@[m [mbughound list-modules[m
+ # Safe (passive) scan of your own site[m
+ bughound scan https://example.com --authorize-host example.com --i-am-authorized[m
+ [m
+[31m-# Aggressive scan (active exploitation) using a scope file[m
+[32m+[m[32m# Aggressive scan (active detection + exploit phase) using a scope file[m
+ bughound scan https://example.com --scope scope.yml --i-am-authorized --aggressive[m
+ [m
+[32m+[m[32m# Aggressive but detection-only (skip the exploit phase)[m
+[32m+[m[32mbughound scan https://example.com --authorize-host example.com --i-am-authorized --aggressive --no-exploit[m
+[32m+[m
+[32m+[m[32m# Map findings to the application's source code (WHERE the bug lives)[m
+[32m+[m[32mbughound scan https://example.com --authorize-host example.com --i-am-authorized \[m
+[32m+[m[32m    --aggressive --source-dir /path/to/app-source[m
+[32m+[m
+[32m+[m[32m# Direct-exploit mode: push a known-vulnerable endpoint through the full[m
+[32m+[m[32m# exploit chain (UNION -> credentials -> login). Ideal for labs.[m
+[32m+[m[32mbughound scan https://lab.web-security-academy.net/ \[m
+[32m+[m[32m    --authorize-host lab.web-security-academy.net --i-am-authorized \[m
+[32m+[m[32m    --aggressive --no-external \[m
+[32m+[m[32m    --exploit-endpoint 'https://lab.web-security-academy.net/filter?category=Pets' \[m
+[32m+[m[32m    --exploit-param category[m
+[32m+[m
+ # Reports are written to ./reports/<host>-<timestamp>.{md,json}[m
+ ```[m
+ [m
+[36m@@ -58,6 +279,36 @@[m [mAuthorization can be provided by any of: `--scope <file>`, one or more[m
+ `--authorize-host <glob>`, or the `BUGHOUND_AUTHORIZED_HOSTS` env var. You must[m
+ also pass `--i-am-authorized`.[m
+ [m
+[32m+[m[32m### Troubleshooting: "0 URLs discovered" / no findings[m
+[32m+[m
+[32m+[m[32mIf a scan finishes almost instantly with `Discovered 0 URLs, 0 injectable[m
+[32m+[m[32mtargets` and no findings, the target was unreachable. bughound now does a[m
+[32m+[m[32msingle pre-flight GET before crawling and emits the exact failure reason:[m
+[32m+[m
+[32m+[m[32m```[m
+[32m+[m[32mbughound scanning https://lab.web-security-academy.net/ (aggressive mode, timeout=30.0s)[m
+[32m+[m[32m[08:39:12] Probing target https://lab.web-security-academy.net/ (timeout 30.0s)...[m
+[32m+[m[32m[08:39:42]   initial probe failed: ConnectTimeout:[m
+[32m+[m[32m             retrying once with 2x timeout (target may be waking up)...[m
+[32m+[m[32m[08:40:12] Target unreachable -- aborting scan (see report for details).[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32mCommon fixes (in order of likelihood for online labs / shared-hosting[m
+[32m+[m[32mtargets):[m
+[32m+[m
+[32m+[m[32m1. **Open the URL in your browser first.** PortSwigger Web Security Academy[m
+[32m+[m[32m   labs, AWS Lambda, and similar on-demand runtimes go to sleep after[m
+[32m+[m[32m   inactivity. The first request wakes them up but can take >15s; once awake[m
+[32m+[m[32m   subsequent requests are fast.[m
+[32m+[m[32m2. **Increase the timeout:** `--timeout 60` (default is now 30s; was 15s).[m
+[32m+[m[32m3. **Override the User-Agent:** `--user-agent 'Mozilla/5.0 ...'`. The[m
+[32m+[m[32m   default is now a recent Chrome UA, but if a site still blocks it pass a[m
+[32m+[m[32m   full browser UA string.[m
+[32m+[m[32m4. **Verify scope:** the host must match an `--authorize-host` glob, a[m
+[32m+[m[32m   `--scope` file entry, or the `BUGHOUND_AUTHORIZED_HOSTS` env var.[m
+[32m+[m
+[32m+[m[32mYou can also pass `--debug` for verbose per-request logging.[m
+[32m+[m
+ ### Denylist (forbidden / out-of-scope targets)[m
+ [m
+ Mark hosts or URLs as forbidden and bughound will **never** crawl them or send a[m
+[36m@@ -90,7 +341,7 @@[m [mbughound serve --host 127.0.0.1 --port 8000[m
+ ```[m
+ [m
+ API:[m
+[31m-- `POST /api/scan` `{ "url", "authorized": true, "authorize_hosts": [...], "deny_hosts": [...], "deny_urls": [...], "aggressive": false }`[m
+[32m+[m[32m- `POST /api/scan` `{ "url", "authorized": true, "authorize_hosts": [...], "deny_hosts": [...], "deny_urls": [...], "aggressive": false, "exploit": true }`[m
+ - `GET /api/scan/{id}` → status, log, result[m
+ - `GET /api/scan/{id}/report.md` → Markdown report[m
+ [m
+[36m@@ -99,12 +350,52 @@[m [mAPI:[m
+ ```[m
+ crawl (same-origin) → discover URLs + injectable params/forms[m
+       → run modules (passive always; active only with --aggressive)[m
+[32m+[m[32m        passive modules include the 12-module recon layer:[m
+[32m+[m[32m          robots-sitemap, dns-recon, subdomain-enum, tech-fingerprint,[m
+[32m+[m[32m          waf-detection, http-methods, js-endpoints, admin-panels,[m
+[32m+[m[32m          api-discovery, backup-files, sourcemap-exposure, email-harvest[m
+[32m+[m[32m        (writes structured attack-surface data into result.recon)[m
+       → run external tools (nuclei always; nmap/sqlmap in aggressive)[m
+[32m+[m[32m      → exploit phase (--aggressive only, disable with --no-exploit):[m
+[32m+[m[32m          re-target every finding with a safe impact-proof exploit[m
+[32m+[m[32m          (UNION extraction, `id` capture, file reads, loopback fetches...)[m
+[32m+[m[32m      → verification phase (control experiments on non-exploited findings):[m
+[32m+[m[32m          negative controls, repeat consistency, baseline cleanliness,[m
+[32m+[m[32m          fresh canaries, directionality — flagged findings are downgraded[m
+[32m+[m[32m      → code mapping (--source-dir): findings pinned to file+line+sink,[m
+[32m+[m[32m          or behaviour-derived sink reconstruction for black-box targets[m
+       → dedupe findings → JSON + Markdown report[m
+[32m+[m[32m          (executive summary, per-finding PoC: curl + raw HTTP pair[m
+[32m+[m[32m           + extracted data + repro steps + impact, vulnerable-code-location[m
+[32m+[m[32m           section, false-positive-analysis table, methodology appendix)[m
+ ```[m
+ [m
+ Modules live in `bughound/modules/{passive,active}/` and self-register via a[m
+[31m-decorator, so adding a check is a single small file.[m
+[32m+[m[32mdecorator, so adding a check is a single small file. The exploit engine lives[m
+[32m+[m[32min `bughound/exploits/` (one module per proof technique, plus[m
+[32m+[m[32m`evidence.py` which standardizes the curl / raw-HTTP-pair / repro-steps[m
+[32m+[m[32martefacts). The false-positive verifier lives in `bughound/verification.py`;[m
+[32m+[m[32mthe source-code mapper in `bughound/codemapper.py`. Recon helpers (DoH DNS[m
+[32m+[m[32mlookup, crt.sh subdomain query, fingerprint catalog) live in[m
+[32m+[m[32m`bughound/modules/recon_utils.py`.[m
+[32m+[m
+[32m+[m[32m## Demo: prove it to yourself[m
+[32m+[m
+[32m+[m[32m```bash[m
+[32m+[m[32mpython examples/vulnerable_app.py          # deliberately vulnerable app on 127.0.0.1:8081[m
+[32m+[m[32mbughound scan http://127.0.0.1:8081/ \[m
+[32m+[m[32m    --authorize-host 127.0.0.1 --i-am-authorized --aggressive --no-external \[m
+[32m+[m[32m    --source-dir examples[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32mThe generated report will show the SQLi finding with the extracted database[m
+[32m+[m[32mbanner and table list, the command-injection finding with the captured[m
+[32m+[m[32m`uid=...` output, the traversal finding with `/etc/passwd` contents, the SSRF[m
+[32m+[m[32mfinding with the loopback fingerprint, and the NoSQLi finding with the[m
+[32m+[m[32mauthentication bypass — each with its curl one-liner, raw HTTP exchange,[m
+[32m+[m[32mexact vulnerable code location (`examples/vulnerable_app.py`, line, function)[m
+[32m+[m[32mand false-positive analysis.[m
+[32m+[m[32mA pre-generated copy is in `examples/sample-report.md`.[m
+ [m
+ ## Tests[m
+ [m
+[1mdiff --git a/bughound/http_client.py b/bughound/http_client.py[m
+[1mindex 2b37229..a865e97 100644[m
+[1m--- a/bughound/http_client.py[m
+[1m+++ b/bughound/http_client.py[m
+[36m@@ -2,8 +2,10 @@[m
+ [m
+ from __future__ import annotations[m
+ [m
+[32m+[m[32mimport asyncio[m
+ import time[m
+[31m-from collections.abc import Callable[m
+[32m+[m[32mfrom collections.abc import Callable, Iterator[m
+[32m+[m[32mfrom contextlib import contextmanager[m
+ from dataclasses import dataclass[m
+ [m
+ import httpx[m
+[36m@@ -23,6 +25,11 @@[m [mclass Response:[m
+     request_method: str = "GET"[m
+     request_headers: dict[str, str] | None = None[m
+     error: str | None = None[m
+[32m+[m[32m    #: Raw response bytes, undecoded. Needed by any check that must hash or[m
+[32m+[m[32m    #: inspect binary content as-is (favicon hashing, file-signature checks)[m
+[32m+[m[32m    #: rather than through ``text``'s charset-decoded (and therefore lossy[m
+[32m+[m[32m    #: for binary payloads) view.[m
+[32m+[m[32m    content: bytes = b""[m
+ [m
+     @property[m
+     def ok(self) -> bool:[m
+[36m@@ -34,8 +41,11 @@[m [mclass HttpClient:[m
+ [m
+     def __init__([m
+         self,[m
+[31m-        timeout: float = 15.0,[m
+[31m-        user_agent: str = "bughound/0.1",[m
+[32m+[m[32m        timeout: float = 30.0,[m
+[32m+[m[32m        user_agent: str = ([m
+[32m+[m[32m            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "[m
+[32m+[m[32m            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"[m
+[32m+[m[32m        ),[m
+         extra_headers: dict[str, str] | None = None,[m
+         follow_redirects: bool = True,[m
+         verify_tls: bool = False,[m
+[36m@@ -85,44 +95,59 @@[m [mclass HttpClient:[m
+                 error=f"DeniedTargetError: {url} is on the denylist (request blocked)",[m
+             )[m
+         want_follow = self._default_follow if follow_redirects is None else follow_redirects[m
+[31m-        try:[m
+[31m-            kwargs = dict(headers=headers, data=data, json=json, params=params)[m
+[31m-            if self._blocked is None:[m
+[31m-                if follow_redirects is not None:[m
+[31m-                    kwargs["follow_redirects"] = follow_redirects[m
+[31m-                resp = await self._client.request(method, url, **kwargs)[m
+[31m-            else:[m
+[31m-                resp = await self._request_guarded(method, url, want_follow, kwargs)[m
+[31m-            return Response([m
+[31m-                url=str(resp.url),[m
+[31m-                status=resp.status_code,[m
+[31m-                headers={k.lower(): v for k, v in resp.headers.items()},[m
+[31m-                text=resp.text,[m
+[31m-                elapsed=time.monotonic() - start,[m
+[31m-                request_method=method,[m
+[31m-                request_headers=dict(resp.request.headers),[m
+[31m-            )[m
+[31m-        except DeniedTargetError as exc:[m
+[31m-            self.blocked_requests.append(str(exc))[m
+[31m-            return Response([m
+[31m-                url=url,[m
+[31m-                status=0,[m
+[31m-                headers={},[m
+[31m-                text="",[m
+[31m-                elapsed=time.monotonic() - start,[m
+[31m-                request_method=method,[m
+[31m-                error=f"DeniedTargetError: redirect to {exc} blocked (denylist)",[m
+[31m-            )[m
+[31m-        except Exception as exc:  # noqa: BLE001 - surface network errors to modules[m
+[31m-            return Response([m
+[31m-                url=url,[m
+[31m-                status=0,[m
+[31m-                headers={},[m
+[31m-                text="",[m
+[31m-                elapsed=time.monotonic() - start,[m
+[31m-                request_method=method,[m
+[31m-                error=f"{type(exc).__name__}: {exc}",[m
+[31m-            )[m
+[32m+[m[32m        # Servers frequently close a keep-alive connection after an error[m
+[32m+[m[32m        # response (e.g. the 500 an SQLi probe triggered). If the next request[m
+[32m+[m[32m        # reuses that stale connection it fails with ReadError/RemoteProtocol-[m
+[32m+[m[32m        # Error even though the target is fine -- so transient transport[m
+[32m+[m[32m        # errors are retried once on a fresh connection before being reported.[m
+[32m+[m[32m        last_exc: Exception | None = None[m
+[32m+[m[32m        for attempt in range(2):[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                kwargs = dict(headers=headers, data=data, json=json, params=params)[m
+[32m+[m[32m                if self._blocked is None:[m
+[32m+[m[32m                    if follow_redirects is not None:[m
+[32m+[m[32m                        kwargs["follow_redirects"] = follow_redirects[m
+[32m+[m[32m                    resp = await self._client.request(method, url, **kwargs)[m
+[32m+[m[32m                else:[m
+[32m+[m[32m                    resp = await self._request_guarded(method, url, want_follow, kwargs)[m
+[32m+[m[32m                return Response([m
+[32m+[m[32m                    url=str(resp.url),[m
+[32m+[m[32m                    status=resp.status_code,[m
+[32m+[m[32m                    headers={k.lower(): v for k, v in resp.headers.items()},[m
+[32m+[m[32m                    text=resp.text,[m
+[32m+[m[32m                    elapsed=time.monotonic() - start,[m
+[32m+[m[32m                    request_method=method,[m
+[32m+[m[32m                    request_headers=dict(resp.request.headers),[m
+[32m+[m[32m                    content=resp.content,[m
+[32m+[m[32m                )[m
+[32m+[m[32m            except DeniedTargetError as exc:[m
+[32m+[m[32m                self.blocked_requests.append(str(exc))[m
+[32m+[m[32m                return Response([m
+[32m+[m[32m                    url=url,[m
+[32m+[m[32m                    status=0,[m
+[32m+[m[32m                    headers={},[m
+[32m+[m[32m                    text="",[m
+[32m+[m[32m                    elapsed=time.monotonic() - start,[m
+[32m+[m[32m                    request_method=method,[m
+[32m+[m[32m                    error=f"DeniedTargetError: redirect to {exc} blocked (denylist)",[m
+[32m+[m[32m                )[m
+[32m+[m[32m            except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError) as exc:[m
+[32m+[m[32m                last_exc = exc[m
+[32m+[m[32m                if attempt == 0:[m
+[32m+[m[32m                    await asyncio.sleep(0.15)[m
+[32m+[m[32m                    continue[m
+[32m+[m[32m            except Exception as exc:  # noqa: BLE001 - surface network errors to modules[m
+[32m+[m[32m                last_exc = exc[m
+[32m+[m[32m                break[m
+[32m+[m[32m        return Response([m
+[32m+[m[32m            url=url,[m
+[32m+[m[32m            status=0,[m
+[32m+[m[32m            headers={},[m
+[32m+[m[32m            text="",[m
+[32m+[m[32m            elapsed=time.monotonic() - start,[m
+[32m+[m[32m            request_method=method,[m
+[32m+[m[32m            error=f"{type(last_exc).__name__}: {last_exc}" if last_exc else "request failed",[m
+[32m+[m[32m        )[m
+ [m
+     async def _request_guarded([m
+         self, method: str, url: str, follow: bool, kwargs: dict[m
+[36m@@ -154,5 +179,37 @@[m [mclass HttpClient:[m
+     async def post(self, url: str, **kwargs) -> Response:[m
+         return await self.request("POST", url, **kwargs)[m
+ [m
+[32m+[m[32m    def jar_cookies(self) -> dict[str, str]:[m
+[32m+[m[32m        """Snapshot of the session cookie jar (name -> value).[m
+[32m+[m
+[32m+[m[32m        Used by injection modules to test cookie parameters (cookies are[m
+[32m+[m[32m        request inputs just like query/form parameters).[m
+[32m+[m[32m        """[m
+[32m+[m[32m        return {c.name: c.value for c in self._client.cookies.jar}[m
+[32m+[m
+[32m+[m[32m    @contextmanager[m
+[32m+[m[32m    def cookie_override(self, name: str, value: str) -> Iterator[None]:[m
+[32m+[m[32m        """Temporarily replace cookie ``name`` in the session jar.[m
+[32m+[m
+[32m+[m[32m        Cookie-parameter injection (TrackingId-style labs) needs the request[m
+[32m+[m[32m        to carry a *different* cookie value while everything else -- session,[m
+[32m+[m[32m        other cookies -- stays identical. The previous value is restored on[m
+[32m+[m[32m        exit, so the scanner's own session state is never polluted. Safe for[m
+[32m+[m[32m        the sequential (single-event-loop) way modules issue requests.[m
+[32m+[m[32m        """[m
+[32m+[m[32m        jar = self._client.cookies[m
+[32m+[m[32m        saved = [c for c in list(jar.jar) if c.name == name][m
+[32m+[m[32m        for c in saved:[m
+[32m+[m[32m            jar.jar.clear(c.domain, c.path, c.name)[m
+[32m+[m[32m        jar.set(name, value)[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            yield[m
+[32m+[m[32m        finally:[m
+[32m+[m[32m            for c in list(jar.jar):[m
+[32m+[m[32m                if c.name == name:[m
+[32m+[m[32m                    jar.jar.clear(c.domain, c.path, c.name)[m
+[32m+[m[32m            for c in saved:[m
+[32m+[m[32m                jar.jar.set_cookie(c)[m
+[32m+[m
+     async def aclose(self) -> None:[m
+         await self._client.aclose()[m
+[1mdiff --git a/bughound/modules/base.py b/bughound/modules/base.py[m
+[1mindex 663ecc9..9dc0020 100644[m
+[1m--- a/bughound/modules/base.py[m
+[1m+++ b/bughound/modules/base.py[m
+[36m@@ -17,6 +17,13 @@[m [mclass RequestTarget:[m
+     method: str = "GET"[m
+     params: dict[str, str] = field(default_factory=dict)[m
+     source: str = ""  # e.g. "query", "form"[m
+[32m+[m[32m    # Raw-body targets (XML/JSON endpoints): the body template carries an[m
+[32m+[m[32m    # ``{INJ}`` marker where payloads are substituted; ``encoding`` names a[m
+[32m+[m[32m    # WAF-bypass payload encoding applied at the marker (e.g.[m
+[32m+[m[32m    # "xml-entities" -> numeric character references).[m
+[32m+[m[32m    body_template: str = ""[m
+[32m+[m[32m    content_type: str = ""[m
+[32m+[m[32m    encoding: str = ""[m
+ [m
+ [m
+ @dataclass[m
+[36m@@ -32,6 +39,41 @@[m [mclass ScanContext:[m
+     seed_html: str = ""[m
+     seed_headers: dict[str, str] = field(default_factory=dict)[m
+     log: Callable[[str], None] = lambda msg: None[m
+[32m+[m[32m    # Shared, mutable recon dictionary. Passive recon modules write structured[m
+[32m+[m[32m    # attack-surface data here (subdomains, DNS records, tech stack, WAF,[m
+[32m+[m[32m    # discovered endpoints, emails, etc.); the engine merges it into[m
+[32m+[m[32m    # ``ScanResult.recon`` after every module finishes. Modules SHOULD guard[m
+[32m+[m[32m    # against clobbering keys written by earlier modules (use ``setdefault``[m
+[32m+[m[32m    # for lists/dicts).[m
+[32m+[m[32m    recon: dict[str, object] = field(default_factory=dict)[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# Stable keys used in ``ScanContext.recon`` / ``ScanResult.recon``. The[m
+[32m+[m[32m# reporting layer uses this list to render the Reconnaissance section in a[m
+[32m+[m[32m# predictable order regardless of which modules ran.[m
+[32m+[m[32mRECON_KEYS: list[str] = [[m
+[32m+[m[32m    "subdomains",[m
+[32m+[m[32m    "subdomain_takeover_candidates",[m
+[32m+[m[32m    "dns_records",[m
+[32m+[m[32m    "whois",[m
+[32m+[m[32m    "favicon_hash",[m
+[32m+[m[32m    "wayback_urls",[m
+[32m+[m[32m    "wayback_interesting_urls",[m
+[32m+[m[32m    "email_security",      # SPF / DMARC / DKIM posture[m
+[32m+[m[32m    "tech_stack",          # {category: [products]}[m
+[32m+[m[32m    "waf",                 # str | None[m
+[32m+[m[32m    "http_methods",        # list[str][m
+[32m+[m[32m    "js_endpoints",        # list[str][m
+[32m+[m[32m    "emails",              # list[str][m
+[32m+[m[32m    "admin_paths",         # list[str][m
+[32m+[m[32m    "api_docs",            # list[str][m
+[32m+[m[32m    "backup_files",        # list[str][m
+[32m+[m[32m    "sourcemaps",          # list[str][m
+[32m+[m[32m    "robots_txt",          # str[m
+[32m+[m[32m    "sitemap_urls",        # list[str][m
+[32m+[m[32m    "security_txt",        # str[m
+[32m+[m[32m    "well_known_paths",    # list[str][m
+[32m+[m[32m][m
+ [m
+ [m
+ class Module:[m
+[1mdiff --git a/bughound/modules/passive/__init__.py b/bughound/modules/passive/__init__.py[m
+[1mindex b349e64..d5011c9 100644[m
+[1m--- a/bughound/modules/passive/__init__.py[m
+[1m+++ b/bughound/modules/passive/__init__.py[m
+[36m@@ -3,13 +3,34 @@[m
+ These modules never send attack payloads; they inspect responses, headers,[m
+ cookies, TLS and well-known paths. They are safe to run against any target the[m
+ operator is authorized to test.[m
+[32m+[m
+[32m+[m[32mThe package also hosts the **reconnaissance** modules: subdomain enumeration,[m
+[32m+[m[32mDNS lookups, technology fingerprinting, WAF detection, JS-endpoint harvesting,[m
+[32m+[m[32madmin-panel discovery, API documentation discovery, backup-file discovery,[m
+[32m+[m[32msource-map exposure, and email harvesting. These write structured[m
+[32m+[m[32mattack-surface data into ``ScanContext.recon`` so the report renders a single[m
+[32m+[m[32mReconnaissance section alongside the findings.[m
+ """[m
+ [m
+ from . import (  # noqa: F401[m
+[32m+[m[32m    admin_panels,[m
+[32m+[m[32m    api_discovery,[m
+[32m+[m[32m    backup_files,[m
+     cookies,[m
+     cors,[m
+[32m+[m[32m    dns_recon,[m
+[32m+[m[32m    email_harvest,[m
+[32m+[m[32m    http_methods,[m
+     info_disclosure,[m
+[32m+[m[32m    js_endpoints,[m
+[32m+[m[32m    robots_sitemap,[m
+     secrets,[m
+     security_headers,[m
+[32m+[m[32m    sourcemap_exposure,[m
+[32m+[m[32m    subdomain_enum,[m
+[32m+[m[32m    tech_fingerprint,[m
+     tls,[m
+[32m+[m[32m    waf_detection,[m
+[32m+[m[32m    wayback_urls,[m
+[32m+[m[32m    whois_recon,[m
+ )[m
+[1mdiff --git a/bughound/reporting.py b/bughound/reporting.py[m
+[1mindex 9631272..6207c35 100644[m
+[1m--- a/bughound/reporting.py[m
+[1m+++ b/bughound/reporting.py[m
+[36m@@ -23,6 +23,272 @@[m [mdef _severity_badge(sev: Severity) -> str:[m
+     }[sev][m
+ [m
+ [m
+[32m+[m[32mdef _render_recon_md(recon: dict) -> list[str]:[m
+[32m+[m[32m    """Render the structured recon dict as a clean Markdown section.[m
+[32m+[m
+[32m+[m[32m    Returns a list of lines (without trailing newline) to splice into the[m
+[32m+[m[32m    report. Empty if no recon data was collected.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    if not recon:[m
+[32m+[m[32m        return [][m
+[32m+[m
+[32m+[m[32m    lines: list[str] = ["## Reconnaissance (attack-surface overview)", ""][m
+[32m+[m
+[32m+[m[32m    # Subdomains[m
+[32m+[m[32m    subdomains = recon.get("subdomains") or [][m
+[32m+[m[32m    if subdomains:[m
+[32m+[m[32m        lines.append(f"### Subdomains discovered ({len(subdomains)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append("_Via Certificate Transparency logs and active DNS brute force._")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        # Render as a fenced list; trim very long lists to keep the report readable.[m
+[32m+[m[32m        shown = subdomains[:60][m
+[32m+[m[32m        for s in shown:[m
+[32m+[m[32m            lines.append(f"- `{s}`")[m
+[32m+[m[32m        if len(subdomains) > len(shown):[m
+[32m+[m[32m            lines.append(f"- ... and {len(subdomains) - len(shown)} more")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Subdomain takeover candidates[m
+[32m+[m[32m    takeovers = recon.get("subdomain_takeover_candidates") or [][m
+[32m+[m[32m    if takeovers:[m
+[32m+[m[32m        lines.append(f"### ⚠ Possible subdomain takeovers ({len(takeovers)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append("| Subdomain | CNAME | Platform |")[m
+[32m+[m[32m        lines.append("|---|---|---|")[m
+[32m+[m[32m        for t in takeovers[:30]:[m
+[32m+[m[32m            lines.append(f"| `{t.get('subdomain')}` | `{t.get('cname')}` | {t.get('service')} |")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append([m
+[32m+[m[32m            "_Flagged from DNS evidence only (dangling CNAME pattern); confirm by hand "[m
+[32m+[m[32m            "or add the host to scope and re-scan before reporting as exploitable._"[m
+[32m+[m[32m        )[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Favicon hash (Shodan/Censys pivot)[m
+[32m+[m[32m    favicon_hash_val = recon.get("favicon_hash")[m
+[32m+[m[32m    if favicon_hash_val is not None:[m
+[32m+[m[32m        lines.append("### Favicon hash")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append([m
+[32m+[m[32m            f"`http.favicon.hash:{favicon_hash_val}` -- search this on Shodan/Censys to find "[m
+[32m+[m[32m            "other hosts serving the identical favicon."[m
+[32m+[m[32m        )[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # WHOIS / RDAP[m
+[32m+[m[32m    whois = recon.get("whois") or {}[m
+[32m+[m[32m    if whois:[m
+[32m+[m[32m        lines.append("### WHOIS / registration")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for label, key in ([m
+[32m+[m[32m            ("Registrar", "registrar"),[m
+[32m+[m[32m            ("Registered", "created"),[m
+[32m+[m[32m            ("Expires", "expires"),[m
+[32m+[m[32m            ("Registrant org", "registrant_org"),[m
+[32m+[m[32m            ("Nameservers", "nameservers"),[m
+[32m+[m[32m        ):[m
+[32m+[m[32m            val = whois.get(key)[m
+[32m+[m[32m            if not val:[m
+[32m+[m[32m                continue[m
+[32m+[m[32m            if isinstance(val, list):[m
+[32m+[m[32m                val = ", ".join(val[:6])[m
+[32m+[m[32m            lines.append(f"- **{label}:** {val}")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Wayback Machine historical URLs[m
+[32m+[m[32m    wayback = recon.get("wayback_urls") or [][m
+[32m+[m[32m    if wayback:[m
+[32m+[m[32m        lines.append(f"### Historical URLs (Wayback Machine, {len(wayback)} shown)")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for u in wayback[:40]:[m
+[32m+[m[32m            lines.append(f"- `{u}`")[m
+[32m+[m[32m        if len(wayback) > 40:[m
+[32m+[m[32m            lines.append(f"- ... and {len(wayback) - 40} more")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m    wayback_interesting = recon.get("wayback_interesting_urls") or [][m
+[32m+[m[32m    if wayback_interesting:[m
+[32m+[m[32m        lines.append("### ⚠ Archived backup/config-looking URLs")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for u in wayback_interesting[:30]:[m
+[32m+[m[32m            lines.append(f"- `{u}`")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # DNS records[m
+[32m+[m[32m    dns = recon.get("dns_records") or {}[m
+[32m+[m[32m    if dns:[m
+[32m+[m[32m        lines.append("### DNS records")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append("| Type | Values |")[m
+[32m+[m[32m        lines.append("|---|---|")[m
+[32m+[m[32m        for rtype, values in dns.items():[m
+[32m+[m[32m            v = ", ".join(str(v) for v in values[:6]) if values else "-"[m
+[32m+[m[32m            if len(values) > 6:[m
+[32m+[m[32m                v += f", ... (+{len(values) - 6})"[m
+[32m+[m[32m            lines.append(f"| {rtype} | {v} |")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Email security[m
+[32m+[m[32m    email_sec = recon.get("email_security") or {}[m
+[32m+[m[32m    if email_sec:[m
+[32m+[m[32m        lines.append("### Email authentication posture")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append(f"- **SPF:** `{email_sec.get('spf') or '(none)'}`")[m
+[32m+[m[32m        lines.append(f"- **DMARC:** `{email_sec.get('dmarc') or '(none)'}`")[m
+[32m+[m[32m        for issue in email_sec.get("issues", []):[m
+[32m+[m[32m            lines.append(f"- ⚠ {issue}")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Tech stack[m
+[32m+[m[32m    stack = recon.get("tech_stack") or {}[m
+[32m+[m[32m    if stack:[m
+[32m+[m[32m        lines.append("### Technology stack")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append("| Category | Products |")[m
+[32m+[m[32m        lines.append("|---|---|")[m
+[32m+[m[32m        for cat, prods in sorted(stack.items()):[m
+[32m+[m[32m            lines.append(f"| {cat} | {', '.join(prods)} |")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # WAF[m
+[32m+[m[32m    waf = recon.get("waf")[m
+[32m+[m[32m    if waf:[m
+[32m+[m[32m        lines.append("### WAF / CDN")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append(f"Fronting security layer: **{waf}**")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m    elif recon.get("waf") is None and "waf" in recon:[m
+[32m+[m[32m        lines.append("### WAF / CDN")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append("No WAF / CDN detected via headers.")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # HTTP methods[m
+[32m+[m[32m    methods = recon.get("http_methods") or [][m
+[32m+[m[32m    if methods:[m
+[32m+[m[32m        lines.append("### HTTP methods advertised")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append(f"`{', '.join(methods)}`")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # JS endpoints[m
+[32m+[m[32m    endpoints = recon.get("js_endpoints") or [][m
+[32m+[m[32m    if endpoints:[m
+[32m+[m[32m        lines.append(f"### Endpoints extracted from JavaScript ({len(endpoints)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        shown = endpoints[:80][m
+[32m+[m[32m        for e in shown:[m
+[32m+[m[32m            lines.append(f"- `{e}`")[m
+[32m+[m[32m        if len(endpoints) > len(shown):[m
+[32m+[m[32m            lines.append(f"- ... and {len(endpoints) - len(shown)} more")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Emails[m
+[32m+[m[32m    emails = recon.get("emails") or [][m
+[32m+[m[32m    if emails:[m
+[32m+[m[32m        lines.append(f"### Email addresses harvested ({len(emails)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for e in emails[:40]:[m
+[32m+[m[32m            lines.append(f"- `{e}`")[m
+[32m+[m[32m        if len(emails) > 40:[m
+[32m+[m[32m            lines.append(f"- ... and {len(emails) - 40} more")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Admin paths[m
+[32m+[m[32m    admin = recon.get("admin_paths") or [][m
+[32m+[m[32m    if admin:[m
+[32m+[m[32m        lines.append(f"### Management / admin paths discovered ({len(admin)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for p in admin:[m
+[32m+[m[32m            lines.append(f"- `{p}`")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # API docs[m
+[32m+[m[32m    api_docs = recon.get("api_docs") or [][m
+[32m+[m[32m    if api_docs:[m
+[32m+[m[32m        lines.append(f"### API documentation endpoints ({len(api_docs)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for p in api_docs:[m
+[32m+[m[32m            lines.append(f"- `{p}`")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Backup files[m
+[32m+[m[32m    backups = recon.get("backup_files") or [][m
+[32m+[m[32m    if backups:[m
+[32m+[m[32m        lines.append(f"### Backup / versioned files discovered ({len(backups)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for p in backups:[m
+[32m+[m[32m            lines.append(f"- `{p}`")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Sourcemaps[m
+[32m+[m[32m    maps = recon.get("sourcemaps") or [][m
+[32m+[m[32m    if maps:[m
+[32m+[m[32m        lines.append(f"### Exposed source maps ({len(maps)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for m in maps:[m
+[32m+[m[32m            lines.append(f"- `{m}`")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Well-known paths[m
+[32m+[m[32m    wk = recon.get("well_known_paths") or [][m
+[32m+[m[32m    if wk:[m
+[32m+[m[32m        lines.append(f"### Well-known endpoints ({len(wk)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        for p in wk:[m
+[32m+[m[32m            lines.append(f"- `{p}`")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # robots.txt[m
+[32m+[m[32m    robots = recon.get("robots_txt") or ""[m
+[32m+[m[32m    if robots:[m
+[32m+[m[32m        lines.append("### robots.txt")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append("```")[m
+[32m+[m[32m        lines.append(robots[:2000])[m
+[32m+[m[32m        lines.append("```")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # security.txt[m
+[32m+[m[32m    sec_txt = recon.get("security_txt") or ""[m
+[32m+[m[32m    if sec_txt:[m
+[32m+[m[32m        lines.append("### security.txt")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        lines.append("```")[m
+[32m+[m[32m        lines.append(sec_txt[:2000])[m
+[32m+[m[32m        lines.append("```")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Sitemap URLs[m
+[32m+[m[32m    sitemap = recon.get("sitemap_urls") or [][m
+[32m+[m[32m    if sitemap:[m
+[32m+[m[32m        lines.append(f"### URLs from sitemap.xml ({len(sitemap)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        shown = sitemap[:60][m
+[32m+[m[32m        for u in shown:[m
+[32m+[m[32m            lines.append(f"- `{u}`")[m
+[32m+[m[32m        if len(sitemap) > len(shown):[m
+[32m+[m[32m            lines.append(f"- ... and {len(sitemap) - len(shown)} more")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    # Discovered URLs (aggregated by robots/sitemap module)[m
+[32m+[m[32m    discovered = recon.get("discovered_urls") or [][m
+[32m+[m[32m    if discovered:[m
+[32m+[m[32m        lines.append(f"### Discovered URLs (well-known + sitemap, {len(discovered)})")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m        shown = discovered[:60][m
+[32m+[m[32m        for u in shown:[m
+[32m+[m[32m            lines.append(f"- `{u}`")[m
+[32m+[m[32m        if len(discovered) > len(shown):[m
+[32m+[m[32m            lines.append(f"- ... and {len(discovered) - len(shown)} more")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+[32m+[m[32m    if len(lines) == 2:  # only the section heading[m
+[32m+[m[32m        lines.append("_No structured reconnaissance data was collected._")[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m[32m    return lines[m
+[32m+[m
+[32m+[m
+ def to_markdown(result: ScanResult) -> str:[m
+     lines: list[str] = [][m
+     t = result.target[m
+[36m@@ -34,20 +300,78 @@[m [mdef to_markdown(result: ScanResult) -> str:[m
+     if result.finished_at:[m
+         lines.append(f"- **Finished:** {result.finished_at.isoformat()}")[m
+     lines.append(f"- **Mode:** {'aggressive (active exploitation)' if result.config.aggressive else 'safe (passive)'}")[m
+[32m+[m[32m    if result.config.aggressive and result.config.exploit:[m
+[32m+[m[32m        lines.append("- **Exploit phase:** enabled (safe, non-destructive impact proofs)")[m
+     lines.append(f"- **URLs crawled:** {result.stats.get('urls_crawled', 0)}")[m
+     lines.append(f"- **Injectable targets:** {result.stats.get('injectable_targets', 0)}")[m
+     lines.append("")[m
+ [m
+     counts = Counter(f.severity for f in result.findings)[m
+[32m+[m[32m    verified = sum(1 for f in result.findings if f.verified)[m
+[32m+[m[32m    exploited = sum(1 for f in result.findings if f.exploit_status == "succeeded")[m
+[32m+[m[32m    fp_verified = result.stats.get("fp_verified", 0)[m
+[32m+[m[32m    fp_flagged = result.stats.get("fp_flagged", 0)[m
+[32m+[m[32m    code_mapped = result.stats.get("code_mapped", 0)[m
+[32m+[m
+[32m+[m[32m    # Executive summary: the three questions every reader asks first.[m
+[32m+[m[32m    lines.append("## Executive summary")[m
+[32m+[m[32m    lines.append("")[m
+[32m+[m[32m    top_cats = [c for c, _ in Counter(f.category.value for f in result.findings).most_common(3)][m
+[32m+[m[32m    lines.append([m
+[32m+[m[32m        f"The scan identified **{len(result.findings)} finding(s)**"[m
+[32m+[m[32m        f" ({counts.get(Severity.CRITICAL, 0)} critical, {counts.get(Severity.HIGH, 0)} high, "[m
+[32m+[m[32m        f"{counts.get(Severity.MEDIUM, 0)} medium, {counts.get(Severity.LOW, 0)} low, "[m
+[32m+[m[32m        f"{counts.get(Severity.INFO, 0)} informational)."[m
+[32m+[m[32m    )[m
+[32m+[m[32m    lines.append([m
+[32m+[m[32m        f" Of these, **{verified} were verified** with hard evidence and "[m
+[32m+[m[32m        f"**{exploited} were actively exploited** with safe, non-destructive payloads to "[m
+[32m+[m[32m        "demonstrate concrete impact (extracted data, command output, or file contents "[m
+[32m+[m[32m        "captured in this report)."[m
+[32m+[m[32m    )[m
+[32m+[m[32m    if fp_verified or fp_flagged:[m
+[32m+[m[32m        lines.append([m
+[32m+[m[32m            f" False-positive control experiments (negative controls, repeat consistency, "[m
+[32m+[m[32m            f"baseline cleanliness) were executed on non-exploited findings: "[m
+[32m+[m[32m            f"**{fp_verified} passed clean**, {fp_flagged} were flagged for manual review."[m
+[32m+[m[32m        )[m
+[32m+[m[32m    if code_mapped:[m
+[32m+[m[32m        lines.append([m
+[32m+[m[32m            f" **{code_mapped} finding(s) were mapped to the exact vulnerable source location** "[m
+[32m+[m[32m            "(file, line and sink excerpt in each finding's 'Vulnerable code location' section)."[m
+[32m+[m[32m        )[m
+[32m+[m[32m    if top_cats:[m
+[32m+[m[32m        lines.append(f" Dominant risk areas: {', '.join(top_cats)}.")[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        lines.append("No vulnerability findings were recorded for this scope and mode.")[m
+[32m+[m[32m    lines.append("")[m
+[32m+[m[32m    if exploited:[m
+[32m+[m[32m        lines.append([m
+[32m+[m[32m            "**Read this first:** findings marked \u2705 EXPLOITED include the exact payload, a "[m
+[32m+[m[32m            "ready-to-run `curl` reproduction, the verbatim HTTP exchange, and the data the "[m
+[32m+[m[32m            "exploit extracted. Triage can confirm each one in minutes without re-deriving "[m
+[32m+[m[32m            "the attack."[m
+[32m+[m[32m        )[m
+[32m+[m[32m        lines.append("")[m
+[32m+[m
+     lines.append("## Summary")[m
+     lines.append("")[m
+[31m-    lines.append("| Severity | Count |")[m
+[31m-    lines.append("|---|---|")[m
+[32m+[m[32m    lines.append("| Severity | Count | Exploited |")[m
+[32m+[m[32m    lines.append("|---|---|---|")[m
+     for sev in SEVERITY_ORDER:[m
+[31m-        lines.append(f"| {_severity_badge(sev)} | {counts.get(sev, 0)} |")[m
+[31m-    lines.append(f"| **Total** | **{len(result.findings)}** |")[m
+[32m+[m[32m        sev_exploited = sum([m
+[32m+[m[32m            1 for f in result.findings if f.severity == sev and f.exploit_status == "succeeded"[m
+[32m+[m[32m        )[m
+[32m+[m[32m        lines.append(f"| {_severity_badge(sev)} | {counts.get(sev, 0)} | {sev_exploited} |")[m
+[32m+[m[32m    lines.append(f"| **Total** | **{len(result.findings)}** | **{exploited}** |")[m
+     lines.append("")[m
+ [m
+[32m+[m[32m    # Recon section: render before coverage so operators see the attack surface[m
+[32m+[m[32m    # up-front. Skip entirely if no recon modules produced data.[m
+[32m+[m[32m    recon_lines = _render_recon_md(result.recon or {})[m
+[32m+[m[32m    if recon_lines:[m
+[32m+[m[32m        lines.extend(recon_lines)[m
+[32m+[m
+     # Coverage: which classes had findings vs were tested with nothing found.[m
+     lines.append("## Coverage")[m
+     lines.append("")[m
+[36m@@ -74,10 +398,16 @@[m [mdef to_markdown(result: ScanResult) -> str:[m
+ [m
+     for i, f in enumerate(result.sorted_findings, 1):[m
+         status = "VERIFIED" if f.verified else f"confidence: {f.confidence}"[m
+[32m+[m[32m        if f.exploit_status == "succeeded":[m
+[32m+[m[32m            status += " \u2705 EXPLOITED"[m
+[32m+[m[32m        elif f.exploit_status == "attempted":[m
+[32m+[m[32m            status += " (exploit attempted)"[m
+         lines.append(f"### {i}. [{_severity_badge(f.severity)}] {f.title}")[m
+         lines.append("")[m
+         lines.append(f"- **Class:** {f.category.value}")[m
+         lines.append(f"- **URL:** {f.url}")[m
+[32m+[m[32m        if f.injection_point:[m
+[32m+[m[32m            lines.append(f"- **Injection point:** `{f.injection_point}`")[m
+         lines.append(f"- **Status:** {status}")[m
+         if f.cwe:[m
+             lines.append(f"- **CWE:** {f.cwe}")[m
+[36m@@ -86,8 +416,12 @@[m [mdef to_markdown(result: ScanResult) -> str:[m
+         if f.description:[m
+             lines.append(f"**Description.** {f.description}")[m
+             lines.append("")[m
+[32m+[m[32m        lines.extend(_render_code_location_md(f))[m
+[32m+[m[32m        if f.impact:[m
+[32m+[m[32m            lines.append(f"**Impact.** {f.impact}")[m
+[32m+[m[32m            lines.append("")[m
+         if f.evidence:[m
+[31m-            lines.append("**Evidence (proof).**")[m
+[32m+[m[32m            lines.append("**Detection evidence.**")[m
+             lines.append("")[m
+             lines.append("```")[m
+             lines.append(f.evidence)[m
+[36m@@ -100,6 +434,8 @@[m [mdef to_markdown(result: ScanResult) -> str:[m
+                 lines.append(f.response_excerpt)[m
+             lines.append("```")[m
+             lines.append("")[m
+[32m+[m[32m        lines.extend(_render_poc_md(f))[m
+[32m+[m[32m        lines.extend(_render_verification_md(f))[m
+         if f.remediation:[m
+             lines.append(f"**Remediation.** {f.remediation}")[m
+             lines.append("")[m
+[36m@@ -107,9 +443,173 @@[m [mdef to_markdown(result: ScanResult) -> str:[m
+             lines.append("**References.** " + ", ".join(f.references))[m
+             lines.append("")[m
+ [m
+[32m+[m[32m    lines.extend(_render_methodology_md(result))[m
+     return "\n".join(lines)[m
+ [m
+ [m
+[32m+[m[32mdef _render_code_location_md(f) -> list[str]:[m
+[32m+[m[32m    """Render the 'where in the code does this happen' section."""[m
+[32m+[m[32m    out: list[str] = ["#### Vulnerable code location", ""][m
+[32m+[m[32m    if f.code_file and f.code_snippet:[m
+[32m+[m[32m        span = f"lines {f.code_lines[0]}-{f.code_lines[1]}" if f.code_lines else "location approximate"[m
+[32m+[m[32m        out.append([m
+[32m+[m[32m            f"**Source-mapped sink:** `{f.code_file}` ({span}), inside **{f.code_symbol}**. "[m
+[32m+[m[32m            "The line marked with `->` is where the injectable input reaches the dangerous sink."[m
+[32m+[m[32m        )[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m        out.append(f"```{(f.code_file.rsplit('.', 1)[-1] or 'text').lower()}")[m
+[32m+[m[32m        out.append(f.code_snippet)[m
+[32m+[m[32m        out.append("```")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    elif f.inferred_sink:[m
+[32m+[m[32m        out.append([m
+[32m+[m[32m            "**Reconstructed sink (black-box evidence).** The application's source code was not "[m
+[32m+[m[32m            "available to this scan, so the vulnerable code pattern below was reconstructed from "[m
+[32m+[m[32m            "observed behaviour -- the input provably reaches a sink of this shape at the listed "[m
+[32m+[m[32m            "injection point (see the detection evidence and raw exchange for the proof)."[m
+[32m+[m[32m        )[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m        out.append("```text")[m
+[32m+[m[32m        out.append(f.inferred_sink)[m
+[32m+[m[32m        out.append("```")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        return [][m
+[32m+[m[32m    return out[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _render_verification_md(f) -> list[str]:[m
+[32m+[m[32m    """Render the false-positive analysis for one finding."""[m
+[32m+[m[32m    if not f.verification_checks:[m
+[32m+[m[32m        if f.exploit_status == "succeeded":[m
+[32m+[m[32m            return [[m
+[32m+[m[32m                "#### False-positive analysis",[m
+[32m+[m[32m                "",[m
+[32m+[m[32m                "The exploit phase reproduced the vulnerability end-to-end and extracted real data "[m
+[32m+[m[32m                "from the target, which is itself the strongest false-positive disproof: random "[m
+[32m+[m[32m                "page drift, caching artefacts or WAF noise cannot fabricate extracted database "[m
+[32m+[m[32m                "rows, command output or file contents. No separate control experiments were needed.",[m
+[32m+[m[32m                "",[m
+[32m+[m[32m            ][m
+[32m+[m[32m        return [][m
+[32m+[m[32m    out: list[str] = ["#### False-positive analysis", ""][m
+[32m+[m[32m    if f.fp_verdict:[m
+[32m+[m[32m        out.append(f.fp_verdict)[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    out.append("| Control experiment | Result | Observed behaviour |")[m
+[32m+[m[32m    out.append("|---|---|---|")[m
+[32m+[m[32m    for c in f.verification_checks:[m
+[32m+[m[32m        mark = "PASS" if c.get("passed") else "FAIL"[m
+[32m+[m[32m        out.append(f"| {c.get('name', '')} | {mark} | {c.get('detail', '')} |")[m
+[32m+[m[32m    out.append("")[m
+[32m+[m[32m    if f.fp_risk:[m
+[32m+[m[32m        if f.fp_risk == "low":[m
+[32m+[m[32m            out.append("**Verdict: LOW false-positive risk** -- every control experiment behaved "[m
+[32m+[m[32m                       "as physics demands: the attack signature appears only for the crafted "[m
+[32m+[m[32m                       "payload and reproduces consistently.")[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            out.append(f"**Verdict: {f.fp_risk.upper()} false-positive risk** -- at least one control "[m
+[32m+[m[32m                       "experiment contradicts the finding. Manual review required before triage.")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    return out[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _render_poc_md(f) -> list[str]:[m
+[32m+[m[32m    """Render the Proof-of-Exploitation block for a single finding."""[m
+[32m+[m[32m    if f.exploit_status != "succeeded" and not f.poc_curl:[m
+[32m+[m[32m        if f.exploit_status == "attempted" and f.exploit_summary:[m
+[32m+[m[32m            return [[m
+[32m+[m[32m                "#### Exploit phase result",[m
+[32m+[m[32m                "",[m
+[32m+[m[32m                f.exploit_summary,[m
+[32m+[m[32m                "",[m
+[32m+[m[32m            ][m
+[32m+[m[32m        return [][m
+[32m+[m
+[32m+[m[32m    out: list[str] = ["#### Proof of exploitation", ""][m
+[32m+[m[32m    if f.exploit_summary:[m
+[32m+[m[32m        out.append(f.exploit_summary)[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    if f.extracted_data:[m
+[32m+[m[32m        out.append("**Data extracted from the target by the exploit:**")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m        out.append("```")[m
+[32m+[m[32m        for item in f.extracted_data:[m
+[32m+[m[32m            out.append(str(item))[m
+[32m+[m[32m        out.append("```")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    if f.poc_curl:[m
+[32m+[m[32m        out.append("**Reproduce (copy-paste):**")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m        out.append("```bash")[m
+[32m+[m[32m        out.append(f.poc_curl)[m
+[32m+[m[32m        out.append("```")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    if f.raw_request:[m
+[32m+[m[32m        out.append("**Raw HTTP exchange:**")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m        out.append("```http")[m
+[32m+[m[32m        out.append(f.raw_request)[m
+[32m+[m[32m        if f.raw_response:[m
+[32m+[m[32m            out.append("")[m
+[32m+[m[32m            out.append(f.raw_response)[m
+[32m+[m[32m        out.append("```")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    if f.reproduction_steps:[m
+[32m+[m[32m        out.append("**Manual reproduction steps:**")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m        for n, step in enumerate(f.reproduction_steps, 1):[m
+[32m+[m[32m            out.append(f"{n}. {step}")[m
+[32m+[m[32m        out.append("")[m
+[32m+[m[32m    return out[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _render_methodology_md(result: ScanResult) -> list[str]:[m
+[32m+[m[32m    """Appendix: how the results were obtained (reproducibility & trust)."""[m
+[32m+[m[32m    exploited = sum(1 for f in result.findings if f.exploit_status == "succeeded")[m
+[32m+[m[32m    mapped = result.stats.get("code_mapped", 0)[m
+[32m+[m[32m    fp_verified = result.stats.get("fp_verified", 0)[m
+[32m+[m[32m    fp_flagged = result.stats.get("fp_flagged", 0)[m
+[32m+[m[32m    source_note = ([m
+[32m+[m[32m        f"Source mapping was performed against `{result.config.source_dir}`; each mapped finding "[m
+[32m+[m[32m        "cites the vulnerable file, line range and sink excerpt."[m
+[32m+[m[32m        if result.config.source_dir[m
+[32m+[m[32m        else "No source directory was supplied (--source-dir), so findings carry behaviour-derived "[m
+[32m+[m[32m        "sink reconstructions instead of verbatim source lines."[m
+[32m+[m[32m    )[m
+[32m+[m[32m    return [[m
+[32m+[m[32m        "## Methodology & limitations",[m
+[32m+[m[32m        "",[m
+[32m+[m[32m        "1. **Crawl.** Same-origin crawl of the authorized target discovered "[m
+[32m+[m[32m        f"{result.stats.get('urls_crawled', 0)} URL(s) and "[m
+[32m+[m[32m        f"{result.stats.get('injectable_targets', 0)} injectable target(s) (query parameters and forms).",[m
+[32m+[m[32m        "2. **Detection.** Passive recon modules ran first (attack-surface mapping above); "[m
+[32m+[m[32m        "active modules then sent non-destructive probe payloads to detect "[m
+[32m+[m[32m        "injection, XSS, traversal, SSRF and misconfiguration classes.",[m
+[32m+[m[32m        "3. **Exploitation.**"[m
+[32m+[m[32m        + (f" {exploited} finding(s) were re-targeted with safe impact-proof exploits: "[m
+[32m+[m[32m           "read-only SQL extraction, informational command execution (`id`, `uname`), "[m
+[32m+[m[32m           "system-file reads, executable-payload survival checks and loopback fetches. "[m
+[32m+[m[32m           "No data was modified or destroyed, and no denial-of-service techniques were used."[m
+[32m+[m[32m           if exploited else " Disabled or nothing to exploit.") + "",[m
+[32m+[m[32m        "4. **False-positive verification.** Findings the exploit phase could not prove were "[m
+[32m+[m[32m        "re-tested with control experiments: negative controls (payload with the active "[m
+[32m+[m[32m        "ingredient removed), repeat-consistency probes, baseline-cleanliness checks, fresh "[m
+[32m+[m[32m        "per-check canaries and differential directionality. "[m
+[32m+[m[32m        f"{fp_verified} passed all controls; {fp_flagged} were flagged for manual review. "[m
+[32m+[m[32m        "A succeeded exploit is its own false-positive disproof, so it bypasses this battery.",[m
+[32m+[m[32m        "5. **Code attribution.** " + source_note,[m
+[32m+[m[32m        "6. **Reporting.** Every claim in this report is backed by the captured request/response "[m
+[32m+[m[32m        "evidence shown alongside it. Findings that could not be proven are explicitly labelled "[m
+[32m+[m[32m        "with their confidence (tentative/firm) rather than overclaimed.",[m
+[32m+[m[32m        "",[m
+[32m+[m[32m        "**Limitations.** Automated testing cannot cover business-logic flaws, authenticated "[m
+[32m+[m[32m        "flows without credentials, or client-side-only rendering. Candidates flagged for manual "[m
+[32m+[m[32m        "review should be verified by a human before triage decisions are made.",[m
+[32m+[m[32m        "",[m
+[32m+[m[32m    ][m
+[32m+[m
+[32m+[m
+ def category_summary(result: ScanResult) -> dict[str, int]:[m
+     c: Counter[str] = Counter()[m
+     for f in result.findings:[m
+[1mdiff --git a/pyproject.toml b/pyproject.toml[m
+[1mindex efae96b..b0a50c1 100644[m
+[1m--- a/pyproject.toml[m
+[1m+++ b/pyproject.toml[m
+[36m@@ -4,7 +4,7 @@[m [mbuild-backend = "setuptools.build_meta"[m
+ [m
+ [project][m
+ name = "bughound"[m
+[31m-version = "0.1.0"[m
+[32m+[m[32mversion = "0.6.2"[m
+ description = "Authorized web vulnerability hunting agent: scans a domain, verifies findings, and writes reports."[m
+ readme = "README.md"[m
+ requires-python = ">=3.10"[m
